@@ -19,7 +19,8 @@ pub mod config;
 pub mod error;
 
 // Re-export key types
-pub use error::{VInputError, VInputResult};
+pub use error::{VInputError, VInputResult, ErrorSeverity, RecoveryStrategy, ResultExt};
+pub use endpointing::{EndpointDetector, EndpointDetectorConfig, EndpointResult};
 
 /// 初始化日志系统
 ///
