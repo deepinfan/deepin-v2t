@@ -6,7 +6,7 @@ use crate::audio::ring_buffer::AudioRingProducer;
 use crate::error::{VInputError, VInputResult};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -94,6 +94,11 @@ impl PipeWireStream {
     /// 检查流是否正在运行
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
+    }
+
+    /// 获取流配置
+    pub fn config(&self) -> &PipeWireStreamConfig {
+        &self.config
     }
 
     /// 等待流结束（阻塞）

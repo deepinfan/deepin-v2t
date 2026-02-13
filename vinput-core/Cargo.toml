@@ -44,3 +44,4 @@ cbindgen = "0.28"
 [dev-dependencies]
 # 用于测试和示例
 hound = "3.5"  # WAV 文件读写
+ctrlc = "3.4"  # Ctrl+C 信号处理

@@ -1,6 +1,6 @@
 //! FFI C-compatible 类型定义
 
-use std::os::raw::{c_char, c_int};
+use std::os::raw::c_char;
 
 /// FFI 结果码
 #[repr(C)]
