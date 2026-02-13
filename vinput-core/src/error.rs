@@ -26,6 +26,9 @@ pub enum VInputError {
     #[error("Silero VAD model load failed: {0}")]
     VadModelLoad(String),
 
+    #[error("VAD inference failed: {0}")]
+    VadInference(String),
+
     // 状态机错误
     #[error("Invalid state transition: {from} + {event}")]
     InvalidTransition { from: String, event: String },

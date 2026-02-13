@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]  # cdylib for FFI, rlib for examples/tests
 [features]
 default = []
 debug-logs = ["tracing-subscriber", "tracing-journald"]
+vad-onnx = ["ort"]  # VAD ONNX 推理功能
 
 [dependencies]
 # Workspace dependencies
@@ -24,7 +25,13 @@ notify.workspace = true
 regex.workspace = true
 
 # PipeWire (audio capture)
-pipewire = "0.8"
+pipewire = "0.9"
+
+# ONNX Runtime (for VAD inference in Phase 1)
+# Use system ONNX Runtime (already installed at /usr/local/lib)
+# Avoid download-binaries to skip OpenSSL dependency
+# Enable with: cargo build --features vad-onnx
+ort = { version = "2.0.0-rc.11", default-features = false, optional = true }
 
 # 日志输出 (可选，仅在 debug-logs feature 启用时)
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }

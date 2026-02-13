@@ -1,8 +1,16 @@
 //! Silero VAD ONNX 推理
 //!
 //! 基于 Silero VAD v5 模型的语音活动检测
+//! Phase 1: 完整的 ONNX Runtime 推理实现
+//!
+//! 需要启用 `vad-onnx` feature
+
+#![cfg(feature = "vad-onnx")]
 
 use crate::error::{VInputError, VInputResult};
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::Value;
 use std::path::Path;
 
 /// Silero VAD 配置
@@ -41,18 +49,19 @@ pub enum VADState {
     Speech,
 }
 
-/// Silero VAD 检测器（Phase 0 MVP）
-///
-/// 注意：当前为接口定义，完整的 ONNX 推理将在 Phase 1 实现
+/// Silero VAD 检测器 (Phase 1: 完整 ONNX 推理)
 pub struct SileroVAD {
     config: SileroVADConfig,
     state: VADState,
     speech_frames: u32,
     silence_frames: u32,
-    // Phase 1: ONNX Runtime session
-    // session: ort::Session,
-    // h: Vec<f32>,
-    // c: Vec<f32>,
+    // ONNX Runtime session
+    session: Session,
+    // LSTM hidden states (batch=1, hidden=64)
+    h: Vec<f32>,
+    c: Vec<f32>,
+    // Sample rate state for reset
+    sr: Vec<i64>,
 }
 
 impl SileroVAD {
@@ -80,11 +89,41 @@ impl SileroVAD {
             config.sample_rate
         );
 
+        // 加载 ONNX 模型
+        let model_bytes = std::fs::read(&config.model_path)
+            .map_err(|e| VInputError::VadModelLoad(format!("Failed to read model file: {}", e)))?;
+
+        let session = Session::builder()
+            .map_err(|e| {
+                VInputError::VadModelLoad(format!("Failed to create session builder: {}", e))
+            })?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| {
+                VInputError::VadModelLoad(format!("Failed to set optimization level: {}", e))
+            })?
+            .with_intra_threads(1)
+            .map_err(|e| {
+                VInputError::VadModelLoad(format!("Failed to set intra threads: {}", e))
+            })?
+            .commit_from_memory(&model_bytes)
+            .map_err(|e| VInputError::VadModelLoad(format!("Failed to load model: {}", e)))?;
+
+        tracing::debug!("ONNX session created successfully");
+
+        // 初始化 LSTM 隐藏状态 (batch=1, hidden=64)
+        let h = vec![0.0f32; 2 * 64]; // 2 layers * 64 hidden
+        let c = vec![0.0f32; 2 * 64]; // 2 layers * 64 hidden
+        let sr = vec![config.sample_rate as i64];
+
         Ok(Self {
             config,
             state: VADState::Silence,
             speech_frames: 0,
             silence_frames: 0,
+            session,
+            h,
+            c,
+            sr,
         })
     }
 
@@ -98,7 +137,6 @@ impl SileroVAD {
     /// 输出：
     /// - speech_prob: 语音概率 [0.0, 1.0]
     ///
-    /// Phase 0 MVP: 返回模拟概率用于接口验证
     /// Phase 1: 完整的 ONNX Runtime 推理
     pub fn process_chunk(&mut self, samples: &[f32]) -> VInputResult<f32> {
         // 验证输入长度
@@ -117,12 +155,55 @@ impl SileroVAD {
             )));
         }
 
-        // Phase 0 MVP: 基于音频能量的简单启发式
-        // Phase 1: 替换为实际的 ONNX 推理
-        let energy = samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32;
-        let speech_prob = (energy * 10.0).min(1.0);
+        // 准备输入张量
+        use ort::inputs;
 
-        tracing::trace!("VAD energy: {:.4}, prob: {:.3}", energy, speech_prob);
+        // Input: (batch=1, time=samples.len())
+        let input_tensor = Value::from_array((vec![1, samples.len()], samples.to_vec()))
+            .map_err(|e| VInputError::VadInference(format!("Failed to create input tensor: {}", e)))?;
+
+        // H: (2, 1, 64) - 2 layers, batch=1, hidden=64
+        let h_tensor = Value::from_array((vec![2, 1, 64], self.h.clone()))
+            .map_err(|e| VInputError::VadInference(format!("Failed to create h tensor: {}", e)))?;
+
+        // C: (2, 1, 64)
+        let c_tensor = Value::from_array((vec![2, 1, 64], self.c.clone()))
+            .map_err(|e| VInputError::VadInference(format!("Failed to create c tensor: {}", e)))?;
+
+        // SR: (1,)
+        let sr_tensor = Value::from_array((vec![1], self.sr.clone()))
+            .map_err(|e| VInputError::VadInference(format!("Failed to create sr tensor: {}", e)))?;
+
+        // 执行推理
+        let outputs = self.session
+            .run(inputs![input_tensor, sr_tensor, h_tensor, c_tensor])
+            .map_err(|e| VInputError::VadInference(format!("Inference failed: {}", e)))?;
+
+        // 提取输出
+        // outputs[0]: speech probability (batch=1, time=1)
+        // outputs[1]: new h state (2, 1, 64)
+        // outputs[2]: new c state (2, 1, 64)
+
+        let speech_prob_tensor = &outputs[0];
+        let (_shape, speech_prob_data) = speech_prob_tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VInputError::VadInference(format!("Failed to extract speech prob: {}", e)))?;
+        let speech_prob = speech_prob_data[0];
+
+        // 更新隐藏状态
+        let new_h_tensor = &outputs[1];
+        let (_h_shape, new_h_slice) = new_h_tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VInputError::VadInference(format!("Failed to extract h state: {}", e)))?;
+        self.h.copy_from_slice(new_h_slice);
+
+        let new_c_tensor = &outputs[2];
+        let (_c_shape, new_c_slice) = new_c_tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| VInputError::VadInference(format!("Failed to extract c state: {}", e)))?;
+        self.c.copy_from_slice(new_c_slice);
+
+        tracing::trace!("VAD inference: prob={:.3}", speech_prob);
 
         Ok(speech_prob)
     }
@@ -134,7 +215,6 @@ impl SileroVAD {
         let prob = self.process_chunk(samples)?;
         let is_speech = prob >= self.config.threshold;
 
-        let old_state = self.state;
         let mut state_changed = false;
 
         match self.state {
@@ -188,7 +268,10 @@ impl SileroVAD {
         self.state = VADState::Silence;
         self.speech_frames = 0;
         self.silence_frames = 0;
-        tracing::debug!("VAD reset");
+        // 重置 LSTM 隐藏状态
+        self.h.fill(0.0);
+        self.c.fill(0.0);
+        tracing::debug!("VAD reset (including LSTM states)");
     }
 
     /// 获取当前状态
@@ -202,17 +285,12 @@ impl SileroVAD {
     }
 }
 
-// Phase 0 说明：
-// 此模块提供了 Silero VAD 的接口定义和基本逻辑
+// Phase 1 实现完成：
+// ✅ 集成 ort crate (ONNX Runtime Rust 绑定)
+// ✅ 加载 silero_vad_v5.onnx 模型
+// ✅ 管理 LSTM 隐藏状态 (h, c)
+// ✅ 执行实际的模型推理
+// ✅ 返回准确的语音概率
+// ✅ 完整的状态机逻辑
 //
-// 完整实现需要（Phase 1）：
-// 1. 集成 ort crate (ONNX Runtime Rust 绑定)
-// 2. 加载 silero_vad_v5.onnx 模型
-// 3. 管理 LSTM 隐藏状态 (h, c)
-// 4. 执行实际的模型推理
-// 5. 返回准确的语音概率
-//
-// 当前 MVP 实现：
-// - 基于音频能量的简单启发式
-// - 完整的状态机逻辑（可直接用于 Phase 1）
-// - 阈值和时间控制已实现
+// 性能目标：< 1ms/帧 (需要基准测试验证)

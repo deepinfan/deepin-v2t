@@ -1,9 +1,11 @@
 //! FFI 导出函数
 //!
 //! Rust cdylib FFI 接口，供 Fcitx5 C++ 插件调用
+//! Phase 1: 基础集成框架（完整集成需要重构架构）
 
-use super::safety::{check_null, check_null_mut, ffi_safe_call, to_ffi_result};
-use super::types::{VInputCommand, VInputCommandType, VInputEvent, VInputFFIResult, VInputHandle};
+use super::safety::{check_null, check_null_mut, ffi_safe_call};
+use super::types::{VInputCommand, VInputCommandType, VInputEvent, VInputEventType, VInputFFIResult};
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Mutex;
@@ -11,20 +13,69 @@ use std::sync::Mutex;
 /// 全局 V-Input Core 实例
 static VINPUT_CORE: Mutex<Option<VInputCoreState>> = Mutex::new(None);
 
-/// V-Input Core 状态
+/// V-Input Core 状态 (Phase 1: 简化版本)
+///
+/// Note: 完整的 ASR/VAD/PipeWire 集成需要重构架构
+/// 当前版本专注于验证 Fcitx5 集成流程
 struct VInputCoreState {
-    // Phase 0: 基本状态
-    initialized: bool,
-    // Phase 1: 添加实际的 ASR、VAD、音频捕获等组件
-    // recognizer: OnlineRecognizer,
-    // vad: SileroVAD,
-    // audio_stream: PipeWireStream,
-    // command_queue: VecDeque<VInputCommand>,
+    // 命令队列
+    command_queue: VecDeque<VInputCommand>,
+    // 录音状态
+    is_recording: bool,
+    // Phase 1.5: 将添加完整的 ASR、VAD、音频捕获
 }
 
 impl VInputCoreState {
     fn new() -> Self {
-        Self { initialized: true }
+        tracing::info!("初始化 V-Input Core (简化版本)");
+
+        Self {
+            command_queue: VecDeque::new(),
+            is_recording: false,
+        }
+    }
+
+    /// 启动录音
+    fn start_recording(&mut self) {
+        if self.is_recording {
+            tracing::warn!("已经在录音中");
+            return;
+        }
+
+        tracing::info!("启动录音 (Phase 1 - 模拟模式)");
+        self.is_recording = true;
+
+        // Phase 1: 这里会启动 PipeWire 音频捕获
+        // 当前仅设置状态标志
+    }
+
+    /// 停止录音并生成识别结果
+    fn stop_recording(&mut self) {
+        if !self.is_recording {
+            tracing::warn!("没有在录音");
+            return;
+        }
+
+        tracing::info!("停止录音 (Phase 1 - 生成测试命令)");
+        self.is_recording = false;
+
+        // Phase 1: 生成一个测试命令
+        // 完整版本会从 ASR 获取真实识别结果
+        let test_text = CString::new("语音输入测试").unwrap();
+        let text_len = "语音输入测试".len();
+        let command = VInputCommand {
+            command_type: VInputCommandType::CommitText,
+            text: test_text.into_raw(),
+            text_len,
+        };
+
+        self.command_queue.push_back(command);
+        tracing::debug!("生成测试命令: 提交文本, 队列长度={}", self.command_queue.len());
+    }
+
+    /// 尝试接收命令
+    fn try_recv_command(&mut self) -> Option<VInputCommand> {
+        self.command_queue.pop_front()
     }
 }
 
@@ -121,23 +172,25 @@ pub extern "C" fn vinput_core_send_event(event: *const VInputEvent) -> VInputFFI
         let event = unsafe { &*event };
 
         // 检查 Core 是否已初始化
-        let core = VINPUT_CORE.lock().unwrap();
-        if core.is_none() {
-            return Err(VInputFFIResult::NotInitialized);
+        let mut core_lock = VINPUT_CORE.lock().unwrap();
+        let core = core_lock
+            .as_mut()
+            .ok_or(VInputFFIResult::NotInitialized)?;
+
+        // Phase 1: 处理事件
+        match event.event_type {
+            VInputEventType::StartRecording => {
+                tracing::info!("接收事件: StartRecording");
+                core.start_recording();
+            }
+            VInputEventType::StopRecording => {
+                tracing::info!("接收事件: StopRecording");
+                core.stop_recording();
+            }
+            _ => {
+                tracing::debug!("接收事件: {:?} (暂不处理)", event.event_type);
+            }
         }
-
-        // Phase 0: 仅记录事件
-        tracing::debug!(
-            "接收事件: {:?}, data_len={}",
-            event.event_type,
-            event.data_len
-        );
-
-        // Phase 1: 实际处理事件
-        // - StartRecording: 启动音频捕获
-        // - StopRecording: 停止音频捕获
-        // - AudioData: 送入 VAD + ASR
-        // - 等等
 
         Ok(VInputFFIResult::Success)
     }) {
@@ -169,14 +222,21 @@ pub extern "C" fn vinput_core_try_recv_command(command: *mut VInputCommand) -> V
         check_null_mut(command, "command")?;
 
         // 检查 Core 是否已初始化
-        let core = VINPUT_CORE.lock().unwrap();
-        if core.is_none() {
-            return Err(VInputFFIResult::NotInitialized);
-        }
+        let mut core_lock = VINPUT_CORE.lock().unwrap();
+        let core = core_lock
+            .as_mut()
+            .ok_or(VInputFFIResult::NotInitialized)?;
 
-        // Phase 0: 无命令
         // Phase 1: 从命令队列读取
-        Err(VInputFFIResult::NoData)
+        if let Some(cmd) = core.try_recv_command() {
+            unsafe {
+                *command = cmd;
+            }
+            tracing::debug!("返回命令: {:?}", unsafe { &*command }.command_type);
+            Ok(VInputFFIResult::Success)
+        } else {
+            Err(VInputFFIResult::NoData)
+        }
     }) {
         Ok(result) => result,
         Err(e) => e,

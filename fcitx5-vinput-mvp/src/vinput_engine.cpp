@@ -83,28 +83,71 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
     FCITX_DEBUG() << "V-Input: keyEvent - "
                   << keyEvent.key().toString();
 
-    // Phase 0: 基本按键处理
-    // 示例：空格键触发语音输入（未实现）
-    if (keyEvent.key().check(FcitxKey_space) &&
-        keyEvent.isRelease() == false) {
+    // Phase 1: 空格键触发语音输入
+    if (keyEvent.key().check(FcitxKey_space)) {
 
-        FCITX_INFO() << "检测到空格键（Phase 0 暂不处理）";
+        if (keyEvent.isRelease()) {
+            // 空格键释放：停止录音
+            FCITX_INFO() << "空格键释放 - 停止录音";
 
-        // Phase 1: 实际语音识别流程：
-        // 1. 空格键按下：开始录音
-        // 2. 空格键释放：停止录音，等待识别结果
-        // 3. 接收命令：提交文本到 InputContext
+            if (vinput_core_initialized_) {
+                VInputVInputEvent stop_event;
+                stop_event.event_type = StopRecording;
+                stop_event.data = nullptr;
+                stop_event.data_len = 0;
 
-        // 示例代码（Phase 1）：
-        // auto* inputContext = keyEvent.inputContext();
-        // VInputVInputCommand command;
-        // if (vinput_core_try_recv_command(&command) == Success) {
-        //     inputContext->commitString(command.text);
-        //     vinput_command_free(&command);
-        // }
+                VInputVInputFFIResult result = vinput_core_send_event(&stop_event);
+                if (result == Success) {
+                    FCITX_INFO() << "停止录音事件已发送";
+
+                    // 尝试获取识别结果
+                    VInputVInputCommand command;
+                    result = vinput_core_try_recv_command(&command);
+                    if (result == Success) {
+                        // 提交识别文本到输入法
+                        auto* inputContext = keyEvent.inputContext();
+                        std::string text(command.text, command.text_len);
+                        FCITX_INFO() << "收到识别结果: " << text;
+                        inputContext->commitString(text);
+
+                        // 释放命令资源
+                        vinput_command_free(&command);
+
+                        // 消费此按键事件
+                        return keyEvent.filterAndAccept();
+                    } else if (result == NoData) {
+                        FCITX_INFO() << "暂无识别结果";
+                    } else {
+                        FCITX_ERROR() << "接收命令失败: " << result;
+                    }
+                } else {
+                    FCITX_ERROR() << "发送停止录音事件失败: " << result;
+                }
+            }
+
+        } else {
+            // 空格键按下：开始录音
+            FCITX_INFO() << "空格键按下 - 开始录音";
+
+            if (vinput_core_initialized_) {
+                VInputVInputEvent start_event;
+                start_event.event_type = StartRecording;
+                start_event.data = nullptr;
+                start_event.data_len = 0;
+
+                VInputVInputFFIResult result = vinput_core_send_event(&start_event);
+                if (result == Success) {
+                    FCITX_INFO() << "开始录音事件已发送";
+                    // 消费此按键事件
+                    return keyEvent.filterAndAccept();
+                } else {
+                    FCITX_ERROR() << "发送开始录音事件失败: " << result;
+                }
+            }
+        }
     }
 
-    // Phase 0: 放过所有按键
+    // 其他按键：不处理
     return keyEvent.filterAndAccept();
 }
 
