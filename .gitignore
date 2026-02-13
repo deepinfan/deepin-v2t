@@ -1,0 +1,79 @@
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# C/C++
+*.o
+*.so
+*.a
+*.out
+*.dylib
+*.exe
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+*.egg
+
+# Qt/QML
+*.pro.user
+*.pro.user.*
+.qmake.stash
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qm
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+
+# ONNX Models (Large files)
+models/*.onnx
+*.onnx
+*.ort
+
+# Audio files
+*.wav
+*.mp3
+*.flac
+
+# Logs
+*.log
+logs/
+
+# Config files with secrets
+*.secret
+.env
+.env.local
+
+# Build artifacts
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Temporary files
+tmp/
+temp/
+*.tmp

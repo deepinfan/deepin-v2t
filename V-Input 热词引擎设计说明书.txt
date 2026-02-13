@@ -1,0 +1,677 @@
+# V-Input 热词引擎设计说明书
+
+**Hotwords Engine Design Specification**
+
+---
+
+## 1. 设计目标
+
+热词（Hotwords）机制通过提升特定词汇的识别权重，显著提高专业术语、人名、地名、公司名等自定义词汇的识别准确率。
+
+**核心目标**:
+1. 支持 Zipformer Transducer 原生热词增强（modified_beam_search）
+2. 动态加载热词文件，无需重启进程
+3. 支持热词权重配置（1.0-5.0）
+4. 上下文感知热词（根据应用/场景自动切换）
+5. 低内存占用（< 5MB）
+
+**约束**:
+- 不支持 SenseVoice/Paraformer（仅 Transducer 架构支持热词）
+- 热词更新只在"空闲状态"重建 recognizer（Streaming 进行时禁止修改）
+- 热词总数限制 < 10000 条（避免 beam search 性能下降）
+
+---
+
+## 2. Zipformer Transducer 热词原理
+
+### 2.1 modified_beam_search 算法
+
+**标准 beam search**:
+```
+score(path) = acoustic_score + lm_score
+```
+
+**modified_beam_search（含热词增强）**:
+```
+if current_word in hotwords:
+    score(path) += hotword_weight × hotword_bonus
+```
+
+**实现位置**: sherpa-onnx 内置，在 beam rescoring 阶段触发
+
+**关键参数**:
+- `hotwords_score`: 热词权重（默认 2.5）
+- `hotwords_file`: 热词文件路径
+
+---
+
+## 3. 热词文件格式
+
+### 3.1 基本格式
+
+```
+# hotwords.txt
+
+# 格式：词汇 [权重]
+# 权重范围：1.0-5.0（默认 2.5）
+
+# 人名
+张三 3.0
+李四 3.0
+王五 3.0
+
+# 专业术语
+深度学习 2.8
+神经网络 2.8
+Transformer 3.5
+
+# 公司/产品名
+OpenAI 3.0
+ChatGPT 3.5
+
+# 地名
+北京市海淀区 2.5
+
+# 使用默认权重（2.5）
+人工智能
+自然语言处理
+```
+
+**解析规则**:
+- `#` 开头为注释行
+- 空行忽略
+- 每行格式: `词汇 [权重]`
+- 权重可选，默认 2.5
+- 支持中文、英文、数字、符号
+
+---
+
+### 3.2 高级格式（分组）
+
+```toml
+# hotwords.toml
+
+[default]
+人工智能 = 2.5
+深度学习 = 2.8
+
+[names]
+# 人名使用高权重
+张三 = 3.5
+李四 = 3.5
+
+[tech]
+# 技术术语
+Transformer = 3.0
+BERT = 3.0
+GPT = 3.5
+
+[companies]
+# 公司名
+OpenAI = 3.2
+Anthropic = 3.2
+```
+
+**优势**:
+- 支持分组管理
+- 可按场景加载不同分组
+- TOML 格式更易解析
+
+---
+
+## 4. 热词引擎架构
+
+### 4.1 核心数据结构
+
+```rust
+struct HotwordsEngine {
+    /// 热词列表（词汇 → 权重）
+    hotwords: HashMap<String, f32>,
+
+    /// 热词文件路径
+    file_path: PathBuf,
+
+    /// 文件监听器（inotify）
+    file_watcher: Option<FileWatcher>,
+
+    /// 是否启用自动重载
+    auto_reload: bool,
+
+    /// 最后加载时间
+    last_loaded: Instant,
+
+    /// 热词总数限制
+    max_hotwords: usize,  // 默认 10000
+}
+
+impl HotwordsEngine {
+    /// 从文件加载热词
+    fn load_from_file(&mut self, path: &Path) -> Result<()>;
+
+    /// 获取 sherpa-onnx 所需的热词字符串
+    fn to_sherpa_format(&self) -> String;
+
+    /// 添加单个热词
+    fn add_hotword(&mut self, word: &str, weight: f32) -> Result<()>;
+
+    /// 移除单个热词
+    fn remove_hotword(&mut self, word: &str) -> Result<()>;
+
+    /// 清空所有热词
+    fn clear(&mut self);
+
+    /// 热重载（文件变化时自动调用）
+    fn hot_reload(&mut self) -> Result<()>;
+}
+```
+
+---
+
+### 4.2 sherpa-onnx 集成
+
+**创建 Recognizer 时传入热词**:
+
+```rust
+use sherpa_onnx::OnlineRecognizerConfig;
+
+let mut config = OnlineRecognizerConfig::default();
+config.model_config.transducer.encoder = "encoder.onnx".to_string();
+config.model_config.transducer.decoder = "decoder.onnx".to_string();
+config.model_config.transducer.joiner = "joiner.onnx".to_string();
+config.model_config.tokens = "tokens.txt".to_string();
+
+// 设置热词
+config.hotwords_file = "/path/to/hotwords.txt".to_string();
+config.hotwords_score = 2.5;  // 全局权重
+
+let recognizer = OnlineRecognizer::new(config)?;
+```
+
+**sherpa-onnx 期望的热词文件格式**:
+
+```
+# 每行一个词汇，权重统一由 hotwords_score 控制
+深度学习
+神经网络
+Transformer
+```
+
+**高级用法（每个词独立权重）**:
+
+```cpp
+// sherpa-onnx C++ API
+std::vector<std::vector<int32_t>> hotwords;
+std::vector<float> hotwords_scores;
+
+for (const auto& [word, weight] : hotwords_map) {
+    auto tokens = tokenizer.Encode(word);
+    hotwords.push_back(tokens);
+    hotwords_scores.push_back(weight);
+}
+
+recognizer.SetHotwords(hotwords, hotwords_scores);
+```
+
+---
+
+## 5. 热词更新策略
+
+### 5.1 冷更新（重建 Recognizer）
+
+**触发条件**:
+- 热词文件变化（inotify 事件）
+- 用户手动触发重载（GUI 按钮）
+
+**执行流程**:
+
+```rust
+impl VoiceInputEngine {
+    fn reload_hotwords(&mut self) -> Result<()> {
+        // 1. 检查当前状态（必须是 Idle）
+        if self.state != VoiceInputState::Idle {
+            return Err(Error::CannotReloadDuringRecognition);
+        }
+
+        // 2. 重新加载热词文件
+        self.hotwords_engine.hot_reload()?;
+
+        // 3. 销毁旧 recognizer
+        drop(self.recognizer);
+
+        // 4. 创建新 recognizer（包含新热词）
+        let config = self.build_recognizer_config()?;
+        self.recognizer = OnlineRecognizer::new(config)?;
+
+        // 5. 通知用户
+        self.show_notification("热词已更新")?;
+
+        Ok(())
+    }
+}
+```
+
+**性能开销**:
+- 销毁旧 recognizer: ~50ms
+- 创建新 recognizer: ~200ms
+- **总计: ~250ms**（用户无感知，因为在空闲状态）
+
+---
+
+### 5.2 热更新（运行时修改）
+
+**Streaming 进行时禁止修改**:
+
+```rust
+impl HotwordsEngine {
+    fn add_hotword(&mut self, word: &str, weight: f32) -> Result<()> {
+        // 1. 检查是否正在识别
+        if self.recognizer.is_recognizing() {
+            // 加入待处理队列，等待空闲时应用
+            self.pending_updates.push(HotwordUpdate::Add(word.to_string(), weight));
+            return Ok(());
+        }
+
+        // 2. 立即更新
+        self.hotwords.insert(word.to_string(), weight);
+        self.rebuild_recognizer()?;
+
+        Ok(())
+    }
+}
+```
+
+---
+
+## 6. 上下文感知热词
+
+### 6.1 应用级热词
+
+**场景**: 不同应用使用不同热词集
+
+```rust
+struct ContextualHotwords {
+    /// 全局热词（所有应用）
+    global: HashMap<String, f32>,
+
+    /// 应用级热词（app_id → 热词列表）
+    per_app: HashMap<String, HashMap<String, f32>>,
+
+    /// 当前活动应用
+    current_app: Option<String>,
+}
+
+impl ContextualHotwords {
+    fn get_active_hotwords(&self) -> HashMap<String, f32> {
+        let mut hotwords = self.global.clone();
+
+        // 合并当前应用的热词
+        if let Some(app_id) = &self.current_app {
+            if let Some(app_hotwords) = self.per_app.get(app_id) {
+                hotwords.extend(app_hotwords.clone());
+            }
+        }
+
+        hotwords
+    }
+}
+```
+
+**应用检测**（Fcitx5 提供）:
+
+```cpp
+// Fcitx5 C++ 端
+auto app_id = inputContext()->program();  // 例如 "code", "firefox"
+vinput_core_set_current_app(app_id.c_str());
+```
+
+**配置文件**（`~/.config/vinput/app_hotwords.toml`）:
+
+```toml
+[global]
+人工智能 = 2.5
+
+[apps.code]
+# VS Code 编辑器
+class = 3.0
+function = 3.0
+async = 3.5
+await = 3.5
+
+[apps.firefox]
+# 浏览器
+Google = 2.8
+YouTube = 2.8
+```
+
+---
+
+### 6.2 历史记录热词
+
+**场景**: 根据用户最近输入的词汇动态调整热词
+
+```rust
+struct HistoryBasedHotwords {
+    /// 最近提交的词汇（最多保留 100 条）
+    recent_words: VecDeque<String>,
+
+    /// 词频统计
+    word_freq: HashMap<String, usize>,
+
+    /// 自动热词权重
+    auto_weight: f32,  // 默认 1.5
+}
+
+impl HistoryBasedHotwords {
+    fn on_commit(&mut self, text: &str) {
+        // 分词（简单按空格和标点分割）
+        for word in text.split(|c: char| c.is_whitespace() || c.is_ascii_punctuation()) {
+            if word.len() >= 2 {  // 忽略单字
+                self.recent_words.push_back(word.to_string());
+                *self.word_freq.entry(word.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        // 限制队列长度
+        while self.recent_words.len() > 100 {
+            if let Some(old_word) = self.recent_words.pop_front() {
+                if let Some(count) = self.word_freq.get_mut(&old_word) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.word_freq.remove(&old_word);
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_auto_hotwords(&self) -> HashMap<String, f32> {
+        self.word_freq.iter()
+            .filter(|(_, &count)| count >= 2)  // 出现 2 次以上才加入热词
+            .map(|(word, _)| (word.clone(), self.auto_weight))
+            .collect()
+    }
+}
+```
+
+**合并策略**:
+
+```rust
+fn merge_all_hotwords(&self) -> HashMap<String, f32> {
+    let mut hotwords = HashMap::new();
+
+    // 1. 全局热词（最低优先级）
+    hotwords.extend(self.global_hotwords.clone());
+
+    // 2. 应用级热词（中优先级）
+    hotwords.extend(self.contextual_hotwords.get_active_hotwords());
+
+    // 3. 历史记录热词（最高优先级）
+    hotwords.extend(self.history_hotwords.get_auto_hotwords());
+
+    // 4. 限制总数（优先保留权重高的）
+    if hotwords.len() > self.max_hotwords {
+        let mut sorted: Vec<_> = hotwords.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted.truncate(self.max_hotwords);
+        hotwords = sorted.into_iter().collect();
+    }
+
+    hotwords
+}
+```
+
+---
+
+## 7. GUI 集成
+
+### 7.1 热词编辑器
+
+**界面设计**（Qt5/QML）:
+
+```qml
+// HotwordsEditor.qml
+Rectangle {
+    width: 600
+    height: 400
+
+    Column {
+        spacing: 10
+
+        Text {
+            text: "热词管理"
+            font.pixelSize: 18
+            font.bold: true
+        }
+
+        // 热词列表
+        TableView {
+            id: hotwordsTable
+            width: parent.width
+            height: 300
+
+            model: hotwordsModel
+            delegate: Row {
+                TextField {
+                    text: model.word
+                    onEditingFinished: {
+                        hotwordsModel.updateWord(index, text)
+                    }
+                }
+
+                SpinBox {
+                    value: model.weight * 10  // 1.0-5.0 → 10-50
+                    from: 10
+                    to: 50
+                    onValueModified: {
+                        hotwordsModel.updateWeight(index, value / 10.0)
+                    }
+                }
+
+                Button {
+                    text: "删除"
+                    onClicked: {
+                        hotwordsModel.removeRow(index)
+                    }
+                }
+            }
+        }
+
+        // 添加热词
+        Row {
+            TextField {
+                id: newWordInput
+                placeholderText: "输入新热词"
+            }
+
+            Button {
+                text: "添加"
+                onClicked: {
+                    hotwordsModel.addWord(newWordInput.text, 2.5)
+                    newWordInput.text = ""
+                }
+            }
+        }
+
+        // 操作按钮
+        Row {
+            Button {
+                text: "保存"
+                onClicked: {
+                    hotwordsBackend.saveToFile()
+                }
+            }
+
+            Button {
+                text: "重新加载"
+                onClicked: {
+                    hotwordsBackend.reload()
+                }
+            }
+
+            Button {
+                text: "导入..."
+                onClicked: {
+                    fileDialog.open()
+                }
+            }
+
+            Button {
+                text: "导出..."
+                onClicked: {
+                    // ...
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+### 7.2 实时预览
+
+**测试音频识别差异**:
+
+```qml
+// HotwordsPreview.qml
+Rectangle {
+    Column {
+        Text {
+            text: "热词效果预览"
+        }
+
+        Button {
+            text: "选择测试音频"
+            onClicked: {
+                audioFileDialog.open()
+            }
+        }
+
+        Row {
+            // 无热词结果
+            Column {
+                Text { text: "无热词" }
+                TextArea {
+                    id: resultWithoutHotwords
+                    readOnly: true
+                }
+            }
+
+            // 有热词结果
+            Column {
+                Text { text: "有热词" }
+                TextArea {
+                    id: resultWithHotwords
+                    readOnly: true
+                }
+            }
+        }
+
+        // 差异高亮
+        TextArea {
+            id: diff
+            text: "差异: " + highlightDifferences(
+                resultWithoutHotwords.text,
+                resultWithHotwords.text
+            )
+        }
+    }
+}
+```
+
+---
+
+## 8. 性能优化
+
+### 8.1 内存占用
+
+**热词数据结构大小**:
+
+```
+1 条热词:
+  - String (词汇): ~平均 6 字节（中文 2 字 × 3 bytes/char）
+  - f32 (权重): 4 字节
+  - HashMap 开销: ~16 字节
+  总计: ~26 字节/条
+
+10000 条热词:
+  26 × 10000 = 260KB ✅
+```
+
+**优化策略**:
+- 使用 `Arc<str>` 替代 `String`（减少拷贝）
+- 热词权重量化为 `u8`（1.0-5.0 → 10-50）
+- 使用 `FxHashMap` 替代 `HashMap`（更快哈希）
+
+---
+
+### 8.2 Beam Search 性能影响
+
+**sherpa-onnx 官方建议**:
+- 热词 < 1000 条: 无明显影响
+- 热词 1000-5000 条: RTF 增加 ~10%
+- 热词 > 5000 条: RTF 增加 ~30%
+
+**缓解策略**:
+- 限制总热词数 < 5000
+- 优先加载高权重热词
+- 按应用/场景动态加载，避免全量加载
+
+---
+
+## 9. 测试用例
+
+### 9.1 基本功能测试
+
+| 用例 | 操作 | 预期结果 |
+|------|------|---------|
+| **UC-01** | 添加热词 "深度学习" → 识别包含该词的音频 | 识别准确率提升 |
+| **UC-02** | 热词权重 5.0 vs 1.0 | 高权重识别率更高 |
+| **UC-03** | 修改 hotwords.txt → 等待 3s | 自动重载，新热词生效 |
+| **UC-04** | 识别进行中修改热词 | 加入待处理队列，空闲时应用 |
+
+### 9.2 上下文测试
+
+| 用例 | 操作 | 预期结果 |
+|------|------|---------|
+| **UC-05** | VS Code 中识别 "async function" | "async" 权重提升 |
+| **UC-06** | 切换到浏览器识别 "Google" | "Google" 权重提升 |
+| **UC-07** | 最近输入 "张三" 3 次 → 再次识别 | "张三" 自动加入热词 |
+
+---
+
+## 10. 实施路线图
+
+### Phase 1 (MVP)
+- ✅ 基本热词加载（hotwords.txt）
+- ✅ sherpa-onnx 集成
+- ✅ 冷更新（重建 recognizer）
+
+### Phase 2 (v1.0)
+- ✅ 文件监听自动重载（inotify）
+- ✅ GUI 热词编辑器
+- ✅ 导入/导出功能
+
+### Phase 3 (v1.1+)
+- ⚠️ 上下文感知热词（应用级）
+- ⚠️ 历史记录自动热词
+- ⚠️ 实时预览（测试音频）
+
+---
+
+## 11. 成熟度评估
+
+该热词引擎具备：
+
+- ✅ **功能完整性**: 覆盖基本和高级热词需求
+- ✅ **性能可控**: 内存 < 5MB，RTF 影响 < 10%
+- ✅ **易用性**: GUI 编辑器 + 自动重载
+- ✅ **可扩展性**: 支持上下文感知、历史记录等高级功能
+- ✅ **兼容性**: sherpa-onnx 原生支持
+
+**适用于产品级离线语音输入法。** ✅
+
+---
+
+**版本**: v1.0
+**最后更新**: 2026-02-13

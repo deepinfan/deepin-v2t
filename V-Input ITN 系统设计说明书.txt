@@ -1,0 +1,379 @@
+# V-Input ITN 系统设计说明书
+
+**Inverse Text Normalization Engine Specification**
+
+---
+
+## 1. 设计目标
+
+本 ITN（Inverse Text Normalization，反向文本正则化）系统服务于如下语音输入架构：
+
+```
+Streaming:   sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
+VAD:         Silero VAD (ONNX)
+ITN:         cn2an-rs+规则层
+Punctuation: Zipformer 自带标点输出+规则层
+```
+
+设计目标：
+
+实现确定性、可回滚、低延迟的反向文本正则化系统。
+
+约束：
+
+* 无概率模型
+* 无 ONNX
+* 无 Python 依赖
+* 执行时间 < 1ms
+* 内存 < 5MB
+* 不跨语言块处理
+
+---
+
+## 2. 总体架构
+
+```
+Tokenizer
+    ↓
+ChineseNumberConverter
+    ↓
+EnglishNumberParser
+    ↓
+ContextGuard
+    ↓
+ColloquialGuard
+    ↓
+CurrencyRule
+    ↓
+UnitRule
+    ↓
+PercentageRule
+    ↓
+DateRule
+    ↓
+MergeEngine
+```
+
+执行顺序固定，不得更改。
+
+---
+
+## 3. Token 分段规则
+
+必须先进行分段：
+
+类型：
+
+* ChineseBlock
+* EnglishBlock
+* SymbolBlock
+* NumberBlock
+
+规则：
+
+* 不跨 Block 转换
+* 不修改 Block 内部字符顺序
+* 不跨标点处理
+
+---
+
+## 4. 中文数字转换
+
+字符集：
+
+```
+零一二三四五六七八九十百千万亿点负
+```
+
+要求：
+
+* 使用 `cn2an-rs`
+* 支持整数 / 小数 / 负数
+* 不做语义推断
+
+禁止：
+
+* 不完整表达
+* 模糊表达
+* 与单位混合未分段结构
+
+---
+
+## 5. 英文数字解析
+
+支持：
+
+```
+zero ~ nineteen
+twenty, thirty...
+hundred
+thousand
+million
+billion
+point
+```
+
+规则：
+
+* 分层累加
+* decimal_mode 拼接
+* 不跨句
+* 不跨语言块
+
+---
+
+## 6. ContextGuard
+
+以下结构必须跳过 ITN：
+
+* URL
+* 文件路径
+* CamelCase
+* snake_case
+* 全大写单词
+* 代码片段
+
+匹配到后整段跳过。
+
+---
+
+## 7. ColloquialGuard
+
+防止口语数量表达误转为金额。
+
+### 7.1 金额转换强化条件
+
+必须存在：
+
+```
+[Number Phrase] + [Currency Keyword]
+```
+
+Currency Keyword 白名单：
+
+```
+dollar / dollars
+usd
+euro / euros
+yuan
+rmb
+yen
+pounds
+人民币
+美元
+欧元
+日元
+英镑
+块钱
+元
+```
+
+---
+
+### 7.2 禁止结构
+
+若数字后出现：
+
+```
+个
+的
+块的
+件
+份
+次
+台
+张
+条
+```
+Block 内必须以货币结尾
+则禁止金额转换。
+
+
+---
+
+原则：
+
+> 宁可不转，不可误转。
+
+---
+
+## 8. CurrencyRule
+
+触发条件：
+
+* 通过 ColloquialGuard
+* 存在 Currency Keyword
+
+输出规范（Professional 默认）：
+
+* 不加千分位
+* 不强制两位小数
+* 不自动补零
+* 不自动本地化
+
+示例：
+
+```
+one hundred dollars → $100
+三百元 → ¥300
+```
+
+百万级表达：
+
+```
+three point five million USD
+→ 3.5 million USD
+```
+
+不得强制展开为整数。
+
+---
+
+## 9. UnitRule
+
+支持单位：
+
+```
+GB MB KB TB
+CPU
+Hz MHz GHz
+ms s
+%
+```
+
+规则：
+
+* 数字 + 单位
+* 保留空格
+* 不重排结构
+
+---
+
+## 10. PercentageRule
+
+支持：
+
+```
+百分之二十 → 20%
+```
+
+禁止：
+
+* 不完整结构
+* 英文百分比自动推断
+* 若百分比后紧接量词 → 禁止转换
+---
+
+## 11. DateRule
+
+支持：
+
+```
+二零二六年三月五号 → 2026年3月5日
+```
+
+约束：
+
+* 不自动翻译英文月份
+* 不做日期合法性校验
+* 不跨语言块
+
+---
+
+## 12. 模式控制
+
+```rust
+enum ITNMode {
+    Auto,
+    NumbersOnly,
+    Raw,
+}
+```
+
+### Auto
+
+* 启用全部规则
+
+### NumbersOnly
+
+* 仅执行中文数字转换
+* 不执行金额 / 单位 / 日期
+
+### Raw
+
+* 跳过全部 ITN
+
+---
+
+## 13. 可回滚机制
+
+每次转换记录：
+
+```rust
+struct ITNChange {
+    original_span: Range<usize>,
+    original_text: String,
+    normalized_text: String,
+}
+```
+
+支持：
+
+* 段级回滚
+* 模式切换回滚
+* 用户撤销
+
+---
+
+## 14. 冲突优先级
+
+规则冲突按以下优先级处理：
+
+```
+ContextGuard
+    >
+ColloquialGuard
+    >
+CurrencyRule
+    >
+UnitRule
+    >
+PercentageRule
+    >
+DateRule
+```
+
+上层拒绝时，下层不得执行。
+
+---
+
+## 15. 安全约束
+
+ITN 禁止：
+
+* 改写非数字文本
+* 改变词序
+* 删除非数字字符
+* 自动推断语义
+* 跨 Block 修改
+
+---
+
+## 16. 性能指标
+
+* 单段处理 < 1ms
+* 无动态内存扩张
+* O(n) 扫描复杂度
+* 无堆分配循环
+
+---
+
+## 17. 成熟度定义
+
+ITN 必须满足：
+
+* 完全确定性
+* 可预测输出
+* 可回滚
+* 可测试
+* 无随机行为

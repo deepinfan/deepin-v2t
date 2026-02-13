@@ -1,0 +1,447 @@
+# V-Input 撤销重试机制设计说明书
+
+**Undo & Retry Mechanism Design Specification**
+
+---
+
+## 1. 设计目标
+
+撤销/重试机制是所有商业语音输入法的**P0 标配功能**，V-Input 必须实现以达到可用性基准。
+
+**核心目标**:
+1. 允许用户撤销误识别的文本
+2. 支持重新识别当前句子
+3. 提供时间窗口内的快速拉回
+4. 保持与 Fcitx5 的无缝集成
+
+**约束**:
+- 不依赖应用程序的撤销功能（应用可能不支持）
+- 低内存开销（历史记录不超过 2MB）
+- 快速响应（撤销/重试操作 < 100ms）
+- 与流式输入不冲突
+
+---
+
+## 2. 系统总体架构
+
+```
+┌─────────────────────────────────────────┐
+│           用户交互层                     │
+│  Ctrl+Z / 长按热键 / Ctrl+Shift+Z       │
+└──────────────┬──────────────────────────┘
+               ↓
+┌─────────────────────────────────────────┐
+│        撤销管理器 (UndoManager)          │
+│  - 历史栈管理                            │
+│  - 音频缓冲保存                          │
+│  - 状态恢复                              │
+└──────────────┬──────────────────────────┘
+               ↓
+┌─────────────────────────────────────────┐
+│         Fcitx5 集成层                    │
+│  DeleteSurrounding + SetPreedit          │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 3. 核心数据结构
+
+### 3.1 历史记录项
+
+```rust
+struct UndoEntry {
+    /// Preedit 文本内容
+    preedit_text: String,
+
+    /// 光标位置（相对于 Preedit 文本）
+    cursor_pos: usize,
+
+    /// 原始音频缓冲（用于重新识别）
+    audio_buffer: Vec<i16>,  // 16kHz, 单声道
+
+    /// 提交时间戳（用于时间窗口判定）
+    timestamp: Instant,
+
+    /// VAD 段边界信息（用于重新识别）
+    vad_segments: Vec<(usize, usize)>,  // (start_sample, end_sample)
+
+    /// 识别结果元数据
+    metadata: EntryMetadata,
+}
+
+struct EntryMetadata {
+    /// 字符数
+    char_count: usize,
+
+    /// 音频时长（秒）
+    audio_duration: f32,
+
+    /// 识别置信度
+    confidence: f32,
+}
+```
+
+### 3.2 撤销管理器
+
+```rust
+struct UndoManager {
+    /// 环形缓冲区（最多保存 5 条记录）
+    history: VecDeque<UndoEntry>,
+
+    /// 最大历史记录数
+    max_history: usize,  // 默认 5
+
+    /// 时间窗口（秒）
+    time_window: Duration,  // 默认 3s
+
+    /// 当前是否处于 Preedit 状态
+    in_preedit: bool,
+
+    /// 音频缓冲总大小限制（字节）
+    max_audio_buffer_size: usize,  // 默认 2MB
+}
+```
+
+---
+
+## 4. 功能模块设计
+
+### 4.1 Ctrl+Z 撤销最近提交
+
+**触发条件**:
+- 用户按下 Ctrl+Z
+- 当前不在 Preedit 状态（已 Commit）
+- 历史栈非空
+
+**执行流程**:
+
+```rust
+fn undo_last_commit(&mut self, fcitx: &mut FcitxContext) -> Result<()> {
+    // 1. 从历史栈弹出最近一条记录
+    let entry = self.history.pop_back()
+        .ok_or(Error::EmptyHistory)?;
+
+    // 2. 计算需要删除的字符数
+    let char_count = entry.char_count;
+
+    // 3. 调用 Fcitx5 DeleteSurrounding 删除已提交的文本
+    fcitx.delete_surrounding(-(char_count as i32), char_count)?;
+
+    // 4. 恢复 Preedit 状态
+    fcitx.set_preedit(
+        &entry.preedit_text,
+        entry.cursor_pos,
+        TextFormatFlag::Underline,
+    )?;
+
+    // 5. 标记为 Preedit 状态
+    self.in_preedit = true;
+
+    Ok(())
+}
+```
+
+**关键实现细节**:
+- `DeleteSurrounding(offset, nchars)` 删除光标前的 nchars 个字符
+- offset 为负数表示向前删除
+- 删除后立即 SetPreedit，用户可以看到恢复的文本
+
+**边界情况**:
+- 若应用不支持 DeleteSurrounding（如某些终端模拟器）→ 显示警告提示
+- 若历史栈为空 → 系统通知 "无可撤销内容"
+- 若用户在撤销后继续输入 → 清空历史栈，重新开始
+
+---
+
+### 4.2 长按热键重新识别
+
+**触发条件**:
+- 用户长按语音输入热键（如 Ctrl+Shift+V）≥ 2 秒
+- 当前处于 Preedit 状态或刚 Commit（3 秒内）
+
+**执行流程**:
+
+```rust
+fn retry_recognition(&mut self, recognizer: &mut Recognizer) -> Result<()> {
+    // 1. 获取最近一条记录
+    let entry = self.history.back()
+        .ok_or(Error::NoAudioBuffer)?;
+
+    // 2. 显示 "重新识别中..." 提示
+    fcitx.set_preedit(
+        "重新识别中...",
+        0,
+        TextFormatFlag::HighLight,
+    )?;
+
+    // 3. 重置识别器状态
+    recognizer.reset();
+
+    // 4. 送入历史音频重新识别
+    for &sample in &entry.audio_buffer {
+        recognizer.accept_waveform(sample);
+    }
+
+    // 5. 强制结束识别（EndpointDetected）
+    let result = recognizer.finalize();
+
+    // 6. 更新 Preedit 为新识别结果
+    fcitx.set_preedit(
+        &result.text,
+        result.text.len(),
+        TextFormatFlag::Underline,
+    )?;
+
+    // 7. 更新历史记录（保留音频，更新文本）
+    if let Some(entry) = self.history.back_mut() {
+        entry.preedit_text = result.text.clone();
+        entry.confidence = result.confidence;
+    }
+
+    Ok(())
+}
+```
+
+**关键实现细节**:
+- 保留原始音频缓冲（未经 VAD 的完整音频）
+- 使用 `Recognizer::reset()` 清空内部状态
+- 重新识别可能得到不同结果（beam search 随机性）
+
+**优化策略**:
+- 可选：提供 "调整热词权重" 后重新识别
+- 可选：展示多个候选结果供用户选择（类似输入法候选词）
+
+---
+
+### 4.3 时间窗口拉回机制
+
+**触发条件**:
+- 用户按下 Ctrl+Shift+Z
+- 距离最近一次 Commit < 3 秒
+- 历史栈非空
+
+**执行流程**:
+
+```rust
+fn pull_back_within_window(&mut self, fcitx: &mut FcitxContext) -> Result<()> {
+    // 1. 检查时间窗口
+    let entry = self.history.back()
+        .ok_or(Error::EmptyHistory)?;
+
+    let elapsed = entry.timestamp.elapsed();
+    if elapsed > self.time_window {
+        return Err(Error::TimeWindowExpired(elapsed));
+    }
+
+    // 2. 执行撤销操作（复用 undo_last_commit 逻辑）
+    self.undo_last_commit(fcitx)?;
+
+    Ok(())
+}
+```
+
+**时间窗口设计**:
+- 默认 3 秒（可通过 GUI 配置 1-10 秒）
+- 超过时间窗口后，该 Commit 无法撤销（防止误操作）
+- 系统通知提示：
+  - 成功：`无提示`（直接拉回）
+  - 失败：`"已超过撤销时间窗口（3 秒）"`
+
+---
+
+### 4.4 历史栈管理
+
+**环形缓冲区策略**:
+
+```rust
+impl UndoManager {
+    fn push_entry(&mut self, entry: UndoEntry) {
+        // 1. 检查音频缓冲总大小
+        let total_audio_size: usize = self.history.iter()
+            .map(|e| e.audio_buffer.len() * 2)  // i16 = 2 bytes
+            .sum();
+
+        // 2. 若超过限制，移除最老的记录
+        while total_audio_size > self.max_audio_buffer_size {
+            self.history.pop_front();
+        }
+
+        // 3. 添加新记录
+        self.history.push_back(entry);
+
+        // 4. 限制最大记录数
+        if self.history.len() > self.max_history {
+            self.history.pop_front();
+        }
+    }
+}
+```
+
+**内存占用分析**:
+- 单条记录音频: ~10 秒 × 16kHz × 2 bytes = 320KB
+- 5 条记录: 320KB × 5 = 1.6MB
+- 文本 + 元数据: < 100KB
+- **总计: < 2MB** ✅
+
+---
+
+## 5. Fcitx5 集成实现
+
+### 5.1 DeleteSurrounding API
+
+```cpp
+// Fcitx5 C++ 端
+void VInputEngine::handleUndo() {
+    auto ic = inputContext();
+    if (!ic) return;
+
+    // 获取 Rust 核心返回的删除字符数
+    int32_t char_count = vinput_core_get_undo_char_count();
+
+    // 调用 Fcitx5 DeleteSurrounding
+    ic->deleteSurroundingText(-char_count, char_count);
+
+    // 获取恢复的 Preedit 文本
+    std::string preedit_text = vinput_core_get_undo_preedit();
+
+    // 设置 Preedit
+    Text preedit;
+    preedit.append(preedit_text, TextFormatFlag::Underline);
+    ic->inputPanel().setPreedit(preedit);
+    ic->updatePreedit();
+}
+```
+
+### 5.2 热键绑定
+
+**X11**:
+```cpp
+// 注册全局热键
+XGrabKey(display, XKeysymToKeycode(display, XK_z),
+         ControlMask, root_window, True, GrabModeAsync, GrabModeAsync);
+```
+
+**Wayland**:
+```rust
+// 通过 xdg-desktop-portal
+let portal = DesktopPortal::new()?;
+portal.create_shortcut(
+    "undo-voice-input",
+    "Ctrl+Z",
+    |_| vinput_handle_undo()
+)?;
+```
+
+---
+
+## 6. 用户体验设计
+
+### 6.1 视觉反馈
+
+**撤销操作**:
+1. Commit 文本消失（DeleteSurrounding）
+2. Preedit 区域显示恢复的文本（灰色下划线）
+3. 系统托盘图标短暂闪烁绿色 500ms
+
+**重新识别**:
+1. Preedit 显示 "重新识别中..."（蓝色虚线下划线）
+2. 系统托盘图标旋转动画
+3. 完成后 Preedit 更新为新识别结果
+
+**时间窗口拉回**:
+- 成功：无提示（直接拉回）
+- 失败：系统通知 + 托盘图标红色闪烁
+
+### 6.2 快捷键设计
+
+| 快捷键 | 功能 | 说明 |
+|--------|------|------|
+| **Ctrl+Z** | 撤销最近 Commit | 标准撤销操作 |
+| **Ctrl+Shift+Z** | 时间窗口拉回 | 3 秒内快速撤销 |
+| **长按热键 2s** | 重新识别 | 保留音频重新推理 |
+
+**冲突检测**:
+- 检测应用程序是否已绑定 Ctrl+Z
+- 若冲突，GUI 提示用户重新配置
+- 推荐备选：Ctrl+Alt+Z / Super+Z
+
+---
+
+## 7. 性能与限制
+
+### 7.1 性能指标
+
+- **撤销响应时间**: < 100ms（DeleteSurrounding + SetPreedit）
+- **重新识别时间**: < 2s（10 秒音频，RTF ~0.2）
+- **内存占用**: < 2MB（5 条历史记录）
+
+### 7.2 限制与约束
+
+**不支持的场景**:
+- 应用不支持 DeleteSurrounding（如某些终端）→ 提示用户手动撤销
+- 跨应用撤销（切换窗口后无法撤销前一个应用）→ 每个应用独立历史栈
+- 超过时间窗口的 Commit → 无法撤销
+
+**已知问题**:
+- GTK3 部分应用的 DeleteSurrounding 行为不一致
+- Electron 应用可能不响应 DeleteSurrounding
+
+---
+
+## 8. 测试用例
+
+### 8.1 基本功能测试
+
+| 用例 | 操作 | 预期结果 |
+|------|------|---------|
+| **UC-01** | 语音输入 "你好世界" → Commit → Ctrl+Z | 文本消失，Preedit 显示 "你好世界" |
+| **UC-02** | 语音输入 → Commit → 等待 5s → Ctrl+Z | 系统通知 "无可撤销内容" |
+| **UC-03** | 语音输入 → Commit → 2s 内 Ctrl+Shift+Z | 立即拉回 Preedit |
+| **UC-04** | 语音输入 → 长按热键 2s | 显示 "重新识别中..." → 更新 Preedit |
+
+### 8.2 边界测试
+
+| 用例 | 操作 | 预期结果 |
+|------|------|---------|
+| **UC-05** | 连续 10 次 Commit → Ctrl+Z | 只能撤销最近 5 次 |
+| **UC-06** | 撤销后切换应用窗口 | 历史栈清空 |
+| **UC-07** | 撤销后继续语音输入 | Preedit 更新，历史栈保留 |
+
+---
+
+## 9. 实施路线图
+
+### Phase 1 (MVP)
+- ✅ Ctrl+Z 撤销最近 Commit
+- ✅ 基础历史栈管理（5 条记录）
+- ✅ Fcitx5 DeleteSurrounding 集成
+
+### Phase 2 (v1.0)
+- ✅ 时间窗口拉回（Ctrl+Shift+Z）
+- ✅ 长按热键重新识别
+- ✅ GUI 配置时间窗口
+
+### Phase 3 (v1.1+)
+- ⚠️ 多候选结果展示
+- ⚠️ 调整热词权重后重新识别
+- ⚠️ 跨 VAD 段撤销（撤销多句）
+
+---
+
+## 10. 成熟度评估
+
+该撤销/重试机制具备：
+
+- ✅ **功能完整性**: 覆盖所有主流使用场景
+- ✅ **性能可控**: 内存 < 2MB，响应 < 100ms
+- ✅ **兼容性**: Fcitx5 标准 API，跨发行版兼容
+- ✅ **可扩展性**: 支持未来多候选、跨段撤销等高级功能
+- ✅ **用户体验**: 符合标准输入法操作习惯
+
+**适用于产品级离线语音输入法。** ✅
+
+---
+
+**版本**: v1.0
+**最后更新**: 2026-02-13

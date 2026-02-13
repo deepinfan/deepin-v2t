@@ -1,0 +1,349 @@
+# V-Input VAD 系统设计说明书
+
+**Voice Activity Detection Engine Specification**
+
+---
+
+## 1. 设计目标
+
+本 VAD 系统服务于如下语音输入架构：
+
+```
+Streaming:   sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
+VAD:         Silero VAD (ONNX)
+ITN:         cn2an-rs+规则层
+Punctuation: Zipformer 自带标点输出+规则层
+```
+
+设计目标：
+
+1. 支持双输入模式（PushToTalk / AutoDetect）。
+2. 优先避免误触发（宁可漏触发）。
+3. 提供稳定的句子边界。
+4. 实现低延迟启动。
+5. 防止吞首字。
+6. 具备抗噪能力（办公室场景）。
+7. 可参数化、可扩展。
+
+---
+
+## 2. 输入模式设计
+
+### 2.1 支持两种模式
+
+```rust
+enum InputMode {
+    PushToTalk,
+    AutoDetect,
+}
+```
+
+* PushToTalk：按住说话，用户控制开始与结束。
+* AutoDetect：自动检测语音开始与结束。
+
+两种模式使用不同 VAD 参数 Profile。
+
+---
+
+## 3. 系统总体架构
+
+```
+Audio Input
+    ↓
+Energy Gate
+    ↓
+Silero VAD (probability)
+    ↓
+Hysteresis Controller
+    ↓
+Speech/Silence Timer
+    ↓
+Pre-roll Buffer
+    ↓
+ASR Start / Finalize
+```
+
+---
+
+## 4. Energy Gate（第一层过滤）
+
+### 4.1 目的
+
+* 过滤环境噪声
+* 降低 Silero 推理压力
+* 减少误触发
+
+### 4.2 实现方式
+
+* 10ms 帧 RMS 计算
+* 动态噪声基线估计
+
+触发条件：
+
+```
+RMS > noise_floor × 2~3
+```
+
+未通过则不送入 Silero。
+
+---
+
+## 5. Silero VAD 使用策略
+
+Silero 输出：
+
+```
+speech_prob ∈ [0,1]
+```
+
+不得使用单阈值判断。
+
+---
+
+## 6. 迟滞机制（Hysteresis）
+
+### 6.1 双阈值设计
+
+```
+start_threshold = 0.68
+end_threshold   = 0.35
+```
+
+### 6.2 状态转换逻辑
+
+```
+if state == Silence and prob > start_threshold:
+    enter SpeechCandidate
+
+if state == Speech and prob < end_threshold:
+    count SilenceFrames
+```
+
+目的：
+
+* 防止边界抖动
+* 防止快速进出 Speech 状态
+
+---
+
+## 7. PushToTalk 模式参数
+
+### 7.1 特点
+
+* 用户控制开始
+* 用户控制结束
+* VAD 仅辅助
+
+### 7.2 推荐参数
+
+```
+start_threshold = 0.6
+min_speech_duration = 100ms
+min_silence_duration = 500ms
+```
+
+结束逻辑：
+
+```
+松开按键 → 强制 Finalize
+```
+
+---
+
+## 8. AutoDetect 模式参数（误触发优先避免）
+
+### 8.1 特点
+
+* 无物理触发
+* 必须避免误启动
+* 必须避免碎句
+
+### 8.2 推荐参数
+
+```
+start_threshold = 0.68
+end_threshold   = 0.35
+min_speech_duration = 180ms
+min_silence_duration = 900ms
+```
+
+引入语速联动结束阈值
+结合标点系统中的 CPS（字符每秒）机制：
+if CPS > 4.5:
+    min_silence = 500ms
+elif CPS < 2.0:
+    min_silence = 1200ms
+
+
+### 8.3 设计原则
+
+* 启动严格
+* 结束宽松
+* 防止短噪声触发
+
+---
+
+## 9. 短爆发过滤器（Transient Noise Filter）
+
+办公环境常见噪声：
+
+* 键盘
+* 鼠标
+* 桌面敲击
+
+特征：
+
+* RMS 高
+* 持续时间短
+
+规则：
+
+```
+speech_duration < 100ms → 忽略
+```
+
+可显著减少误触发。
+
+---
+
+## 10. 连续触发抑制机制（Auto 模式）
+
+### 10.1 目的
+
+防止持续误触发。
+
+### 10.2 规则
+
+若 10 秒内：
+
+```
+触发 ≥ 3 次
+且每次持续 < 1 秒
+```
+
+则：
+
+```
+start_threshold += 0.05
+```
+
+10 秒无误触后恢复默认。
+
+---
+
+## 11. Pre-roll Buffer（防止吞首字）
+
+### 11.1 目的
+
+避免第一个字被吞掉。
+
+### 11.2 实现
+
+* 维护 00~350ms 环形缓冲
+* 确认 speech 后回送缓冲音频至 ASR
+
+推荐值：
+
+```
+pre_roll = 350ms
+```
+
+---
+
+## 12. 尾音保护机制
+
+问题：
+
+立即检测到 900ms 静音可能截断尾音。
+
+优化：
+
+```
+检测到 900ms 静音
+再等待 100~150ms
+若仍静音 → Finalize
+```
+
+---
+
+## 13. 长时间监听限制
+
+Auto 模式建议：
+
+```
+max_segment_duration = 14s
+```
+
+超过强制切段。
+
+防止：
+
+* 内存累积
+* ASR 激活膨胀
+
+---
+
+## 14. 状态机定义
+
+```rust
+enum VadState {
+    Silence,
+    SpeechCandidate,
+    Speech,
+}
+```
+
+核心计数器：
+
+```rust
+speech_frames: usize
+silence_frames: usize
+```
+
+---
+
+## 15. 参数对比表
+
+| 参数                   | PushToTalk | AutoDetect |
+| -------------------- | ---------- | ---------- |
+| start_threshold      | 0.6        | 0.68       |
+| min_speech_duration  | 100ms      | 180ms      |
+| min_silence_duration | 500ms      | 900ms      |
+| 自适应抑制                | 否          | 是          |
+| 手动结束                 | 是          | 否          |
+
+---
+
+## 16. 与标点系统协同
+
+VAD 段结束时：不直接输出句号，标记为 SentenceCandidate。由 Final 标点模型决定是否为：
+.
+,
+继续合并（极端情况）
+* 标点不得跨段修改
+* 句尾判定由 VAD 控制
+
+---
+
+## 17. 性能目标
+
+* Silero ONNX ≈ 2MB
+* 推理延迟 < 1ms
+* 内存占用 < 10MB
+* 启动时间 < 10ms
+* 若 ASR 队列积压 > 200ms 则降低 Silero 调用频率
+---
+
+## 18. 设计总结
+
+本 VAD 系统具备：
+
+* 双模式支持
+* 迟滞控制
+* 自适应抑制
+* 抗噪优化
+* 首字保护
+* 尾音保护
+* 工业级稳定性
+
+适用于专业办公导向的离线语音输入法。

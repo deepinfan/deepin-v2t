@@ -1,0 +1,289 @@
+# V-Input 标点控制系统设计说明书
+
+**Punctuation Engine Design Specification**
+
+---
+
+## 1. 设计目标
+
+本标点系统服务于如下语音输入架构：
+
+```
+Streaming:   sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30
+VAD:         Silero VAD (ONNX)
+ITN:         cn2an-rs+规则层
+Punctuation: Zipformer 自带标点输出+规则层
+```
+
+标点系统的设计目标：
+
+1. 在 Streaming 阶段提供克制、稳定的节奏提示（逗号）。
+2. 严格控制改动范围，避免抖动。
+3. 不改写词序。
+4. 不跨 VAD 段处理。
+
+---
+
+## 2. 系统总体架构
+
+```
+               ┌──────────────┐
+               │ Pause Engine │
+               └──────┬───────┘
+                      ↓
+               ┌──────────────┐
+               │ Zipformer    │
+               │ Comma Logic  │
+               └──────┬───────┘
+                      ↓
+  
+               ┌──────────────┐
+               │ Rule Layer   │
+               └──────┬───────┘
+                      ↓
+
+
+---
+
+## 3. Zipformer实时输出阶段标点策略
+
+### 3.1 基本原则
+
+* 只允许插入逗号（`,`）
+* 不允许插入句号或问号
+* 不进行语法预测
+* 不运行标点模型
+* 不修改历史文本
+
+Streaming 标点仅用于节奏提示。
+
+冻结最后 3 token
+Streaming 阶段禁止修改
+
+---
+
+### 3.2 动态停顿判定机制
+
+基于：
+
+* VAD 时间戳
+* Token 时长
+* 停顿时间
+
+计算公式：
+
+```
+avg_token_duration = 最近 N 个 token 平均时长
+pause_ratio = pause_duration / avg_token_duration
+```
+
+#### 模式默认阈值：
+
+```
+pause > 500ms
+AND pause_ratio > 3.5
+AND 当前 token 数 ≥ 6
+AND 距离上次逗号 ≥ 4 token
+```
+
+满足条件才插入逗号。
+
+---
+
+### 3.3 Streaming 禁止行为
+
+* 不插入句号
+* 不插入问号
+* 不插入顿号
+* 不跨 VAD 段
+
+
+## 6. 规则增强层
+
+用于弥补模型不足，提高语法结构清晰度。
+
+### 6.1 逻辑连接词插入逗号
+
+```
+因为
+所以
+但是
+然而
+如果
+虽然
+因此
+同时
+另外
+```
+
+仅对这些词前插入逗号。
+只有当前句子 token > 8 时才允许逻辑插入
+token > 18 且没有句号,且 pause_ratio 中等,允许插入 1 个逗号
+
+
+---
+
+### 6.2 问号规则（严格模式）
+
+仅当句尾是：
+
+```
+是否
+是不是
+能否
+可以吗
+对吗
+
+```
+结尾 token 为 “吗”,且 VAD 前 300ms 能量上扬
+
+才允许问号。
+
+单独“吗”不自动转换为问号。
+
+---
+
+
+## 9. 与 VAD 的协同关系
+
+VAD 段结束时：不直接输出句号，标记为 SentenceCandidate。由标点规则层决定是否为：
+.
+,
+继续合并（极端情况）
+* 标点不得跨段修改
+* 句尾判定由 VAD 控制
+
+Professional 模式推荐参数：
+
+```
+结束静音 ≥ 800ms
+```
+
+---
+
+## 8. 多风格参数化设计（可选扩展）
+
+标点系统通过 `StyleProfile` 支持不同用户偏好，实现一套代码多种风格：
+
+```rust
+struct StyleProfile {
+    streaming_pause_ratio: f32,     // 停顿比例阈值
+    streaming_min_tokens: usize,    // 最小 token 数
+    allow_exclamation: bool,        // 是否允许感叹号
+    question_strict_mode: bool,     // 问号严格模式
+    logic_word_strength: f32,       // 逻辑连词插入强度
+}
+```
+
+---
+
+### 8.1 Professional（默认，推荐）
+
+```rust
+StyleProfile {
+    streaming_pause_ratio: 3.5,
+    streaming_min_tokens: 6,
+    allow_exclamation: false,
+    question_strict_mode: true,
+    logic_word_strength: 0.8,
+}
+```
+
+**特点**:
+- 稳重克制，适合办公、技术文档、会议记录场景
+- 标点精简，避免过度标注
+- 逻辑连接词谨慎插入逗号（高置信度才触发）
+- 问号需严格匹配语气词 + 声学特征
+
+**适用场景**:
+- 编写技术文档、工作报告
+- 邮件、正式聊天
+- 代码注释、需求文档
+
+---
+
+### 8.2 Balanced（可选）
+
+```rust
+StyleProfile {
+    streaming_pause_ratio: 2.8,
+    streaming_min_tokens: 4,
+    allow_exclamation: false,
+    question_strict_mode: false,
+    logic_word_strength: 1.0,
+}
+```
+
+**特点**:
+- 更自然，标点略多，接近人工书写习惯
+- 问号检测宽松（"吗" 结尾即可，无需声学验证）
+- 逻辑连词正常强度插入
+
+**适用场景**:
+- 日常聊天、社交媒体
+- 个人笔记、日记
+- 非正式文档
+
+---
+
+### 8.3 Expressive（可选）
+
+```rust
+StyleProfile {
+    streaming_pause_ratio: 2.2,
+    streaming_min_tokens: 3,
+    allow_exclamation: true,
+    question_strict_mode: false,
+    logic_word_strength: 1.2,
+}
+```
+
+**特点**:
+- 情绪表达明显，接近口语化
+- 允许感叹号（检测到声音能量突变或语速加快）
+- 标点丰富，提供更强的节奏感
+
+**适用场景**:
+- 创作类文本（小说、博客）
+- 即时通讯、语音消息转文字
+- 情感表达需求高的场景
+
+---
+
+### 8.4 实施建议
+
+**版本规划**:
+- **v1.0**: 仅实现 Professional 模式（简化开发，确保质量）
+- **v1.1**: 扩展 Balanced 模式（根据用户反馈调整参数）
+- **v1.2**: 扩展 Expressive 模式 + 自定义 Profile 导入/导出
+
+**GUI 集成**:
+- 设置界面提供下拉菜单选择风格
+- 高级用户可编辑 `~/.config/vinput/punctuation_profile.toml` 自定义参数
+- 实时预览：提供测试音频，展示不同风格的输出差异
+
+**切换机制**:
+- 风格切换不重启进程，仅更新 `StyleProfile` 参数
+- 通过 `inotify` 监听配置文件变化，热重载
+
+---
+
+## 10. 核心设计原则总结
+
+1. 规则优先于模型。
+2. 修改必须受限。
+3. 不重写用户内容。
+
+---
+
+## 11. 成熟度评估
+
+该标点系统具备：
+
+* 低抖动
+* 行为可预测
+* 多风格支持
+* 工业级架构分层
+* 长期可维护性
+
+适用于产品级离线语音输入法。

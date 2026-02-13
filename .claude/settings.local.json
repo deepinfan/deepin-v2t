@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo new:*)",
+      "Bash(curl:*)",
+      "Bash(sh:*)",
+      "Bash(rustc:*)",
+      "Bash(chmod:*)",
+      "Bash(pkg-config:*)",
+      "Bash(dpkg:*)",
+      "Bash(sudo apt install:*)",
+      "Bash(./build.sh:*)",
+      "Bash(fcitx5-remote:*)",
+      "WebSearch",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(pgrep:*)",
+      "Bash(ldd:*)",
+      "Bash(ls:*)",
+      "Bash(sudo cp:*)",
+      "Bash(grep:*)",
+      "Bash(git init:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs: Initial commit - Complete V-Input documentation suite\n\n完整的 V-Input 项目文档体系，包含：\n\n主要文档:\n- readme.txt: 项目愿景、技术栈、功能需求、UX规范\n- TECHNICAL_REVIEW_2026-02-13.md: 技术评估报告\n\n子系统设计文档 \\(5份\\):\n- V-Input VAD 系统设计说明书.txt: 双输入模式、迟滞控制\n- V-Input ITN 系统设计说明书.txt: 确定性转换、ColloquialGuard\n- V-Input 标点控制系统设计说明书.txt: 多风格标点系统\n- V-Input 撤销重试机制设计说明书.txt: Ctrl+Z撤销、重录机制\n- V-Input 流式状态机设计说明书.txt: 6状态、10事件完整状态机\n\n功能模块设计 \\(2份\\):\n- V-Input 热词引擎设计说明书.txt: 上下文感知热词\n- V-Input GUI 设置界面完整规格.txt: 6个标签页完整GUI规范\n\n实施计划:\n- V-Input 分阶段实施计划.md: 18周6阶段完整路线图\n\nMVP原型代码:\n- vinput-core-mvp: Rust核心引擎原型\n- fcitx5-vinput-mvp: Fcitx5集成原型\n- models: ONNX模型文件\n\n技术栈:\n- ASR: Zipformer Transducer \\(sherpa-onnx\\)\n- VAD: Silero VAD\n- GUI: Qt5/QML\n- 集成: Fcitx5 FFI\n- 音频: PipeWire Stream API\n\n文档规模: ~5,000行, 质量评分 9/10+\n项目状态: 可立即启动Phase 0技术验证\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(nm:*)",
+      "Bash(readelf:*)",
+      "Bash(c++filt _ZN5fcitx17InputMethodEngine8keyEventERKNS_16InputMethodEntryERNS_8KeyEventE)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)"
+    ]
+  }
+}
