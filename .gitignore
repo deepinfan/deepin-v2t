@@ -71,7 +71,18 @@ logs/
 *.deb
 *.rpm
 *.tar.gz
+*.tar.bz2
 *.zip
+*.tgz
+*.bz2
+
+# Dependencies (large)
+deps/
+.cargo/
+
+# Test binaries
+test_ffi
+test_fcitx5_ffi
 
 # Temporary files
 tmp/

@@ -1,0 +1,39 @@
+[package]
+name = "vinput-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]  # cdylib for FFI, rlib for examples/tests
+
+[features]
+default = []
+debug-logs = ["tracing-subscriber", "tracing-journald"]
+
+[dependencies]
+# Workspace dependencies
+tracing.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+notify.workspace = true
+regex.workspace = true
+
+# PipeWire (audio capture)
+pipewire = "0.8"
+
+# 日志输出 (可选，仅在 debug-logs feature 启用时)
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
+tracing-journald = { version = "0.3", optional = true }
+
+[build-dependencies]
+bindgen = "0.71"
+cbindgen = "0.28"
+
+[dev-dependencies]
+# 用于测试和示例
+hound = "3.5"  # WAV 文件读写
