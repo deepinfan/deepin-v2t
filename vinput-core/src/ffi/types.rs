@@ -120,4 +120,46 @@ impl VInputCommand {
             text_len: 0,
         }
     }
+
+    /// 创建提交文本命令
+    pub fn commit_text(text: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(text).unwrap();
+        Self {
+            command_type: VInputCommandType::CommitText,
+            text: c_text.into_raw(),
+            text_len: text.len(),
+        }
+    }
+
+    /// 创建显示候选命令
+    pub fn show_candidate(candidate: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(candidate).unwrap();
+        Self {
+            command_type: VInputCommandType::ShowCandidate,
+            text: c_text.into_raw(),
+            text_len: candidate.len(),
+        }
+    }
+
+    /// 创建隐藏候选命令
+    pub fn hide_candidate() -> Self {
+        Self {
+            command_type: VInputCommandType::HideCandidate,
+            text: std::ptr::null_mut(),
+            text_len: 0,
+        }
+    }
+
+    /// 创建错误消息命令
+    pub fn error(message: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(message).unwrap();
+        Self {
+            command_type: VInputCommandType::Error,
+            text: c_text.into_raw(),
+            text_len: message.len(),
+        }
+    }
 }

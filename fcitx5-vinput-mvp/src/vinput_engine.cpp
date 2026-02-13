@@ -100,26 +100,64 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                 if (result == Success) {
                     FCITX_INFO() << "停止录音事件已发送";
 
-                    // 尝试获取识别结果
-                    VInputVInputCommand command;
-                    result = vinput_core_try_recv_command(&command);
-                    if (result == Success) {
-                        // 提交识别文本到输入法
-                        auto* inputContext = keyEvent.inputContext();
-                        std::string text(command.text, command.text_len);
-                        FCITX_INFO() << "收到识别结果: " << text;
-                        inputContext->commitString(text);
+                    // 获取输入上下文
+                    auto* inputContext = keyEvent.inputContext();
 
-                        // 释放命令资源
-                        vinput_command_free(&command);
+                    // 循环接收所有命令
+                    while (true) {
+                        VInputVInputCommand command;
+                        result = vinput_core_try_recv_command(&command);
 
-                        // 消费此按键事件
-                        return keyEvent.filterAndAccept();
-                    } else if (result == NoData) {
-                        FCITX_INFO() << "暂无识别结果";
-                    } else {
-                        FCITX_ERROR() << "接收命令失败: " << result;
+                        if (result == Success) {
+                            // 处理命令
+                            std::string text;
+                            if (command.text != nullptr && command.text_len > 0) {
+                                text = std::string(command.text, command.text_len);
+                            }
+
+                            switch (command.command_type) {
+                                case CommitText:
+                                    FCITX_INFO() << "CommitText: " << text;
+                                    inputContext->commitString(text);
+                                    break;
+
+                                case ShowCandidate:
+                                    FCITX_INFO() << "ShowCandidate: " << text;
+                                    // TODO: 显示候选词列表
+                                    // inputContext->inputPanel().setCandidateList(...);
+                                    break;
+
+                                case HideCandidate:
+                                    FCITX_INFO() << "HideCandidate";
+                                    // TODO: 隐藏候选词列表
+                                    // inputContext->inputPanel().reset();
+                                    break;
+
+                                case Error:
+                                    FCITX_ERROR() << "Error: " << text;
+                                    // TODO: 显示错误消息
+                                    break;
+
+                                default:
+                                    FCITX_WARN() << "Unknown command type: "
+                                                << static_cast<int>(command.command_type);
+                                    break;
+                            }
+
+                            // 释放命令资源
+                            vinput_command_free(&command);
+
+                        } else if (result == NoData) {
+                            // 无更多命令
+                            break;
+                        } else {
+                            FCITX_ERROR() << "接收命令失败: " << result;
+                            break;
+                        }
                     }
+
+                    // 消费此按键事件
+                    return keyEvent.filterAndAccept();
                 } else {
                     FCITX_ERROR() << "发送停止录音事件失败: " << result;
                 }

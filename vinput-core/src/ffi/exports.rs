@@ -4,7 +4,7 @@
 //! Phase 1: 基础集成框架（完整集成需要重构架构）
 
 use super::safety::{check_null, check_null_mut, ffi_safe_call};
-use super::types::{VInputCommand, VInputCommandType, VInputEvent, VInputEventType, VInputFFIResult};
+use super::types::{VInputCommand, VInputEvent, VInputEventType, VInputFFIResult};
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -59,18 +59,25 @@ impl VInputCoreState {
         tracing::info!("停止录音 (Phase 1 - 生成测试命令)");
         self.is_recording = false;
 
-        // Phase 1: 生成一个测试命令
-        // 完整版本会从 ASR 获取真实识别结果
-        let test_text = CString::new("语音输入测试").unwrap();
-        let text_len = "语音输入测试".len();
-        let command = VInputCommand {
-            command_type: VInputCommandType::CommitText,
-            text: test_text.into_raw(),
-            text_len,
-        };
+        // Phase 1: 生成测试命令序列
+        // 完整版本会从 ASR 获取真实识别结果并生成相应命令
 
-        self.command_queue.push_back(command);
-        tracing::debug!("生成测试命令: 提交文本, 队列长度={}", self.command_queue.len());
+        // 1. 显示候选词（模拟识别过程中的候选）
+        self.command_queue
+            .push_back(VInputCommand::show_candidate("语音|鱼音|雨音"));
+
+        // 2. 提交最终识别结果
+        self.command_queue
+            .push_back(VInputCommand::commit_text("语音输入测试"));
+
+        // 3. 隐藏候选词
+        self.command_queue
+            .push_back(VInputCommand::hide_candidate());
+
+        tracing::debug!(
+            "生成测试命令序列: 队列长度={}",
+            self.command_queue.len()
+        );
     }
 
     /// 尝试接收命令
