@@ -9,24 +9,90 @@ use std::ptr;
 // 引入 bindgen 生成的绑定
 include!(concat!(env!("OUT_DIR"), "/sherpa_bindings.rs"));
 
+/// 识别的 Token 信息
+#[derive(Debug, Clone)]
+pub struct RecognizedToken {
+    /// Token 文本
+    pub text: String,
+    /// Token 开始时间（毫秒）
+    pub start_time_ms: u64,
+    /// Token 结束时间（毫秒）
+    pub end_time_ms: u64,
+    /// 置信度（0.0-1.0）
+    pub confidence: f32,
+}
+
+impl RecognizedToken {
+    /// Token 时长（毫秒）
+    pub fn duration_ms(&self) -> u64 {
+        self.end_time_ms.saturating_sub(self.start_time_ms)
+    }
+
+    /// 转换为 PunctuationEngine 的 TokenInfo
+    pub fn to_token_info(&self) -> crate::punctuation::TokenInfo {
+        crate::punctuation::TokenInfo::new(
+            self.text.clone(),
+            self.start_time_ms,
+            self.end_time_ms,
+        )
+    }
+}
+
+/// 识别结果（包含 Token 信息）
+#[derive(Debug, Clone)]
+pub struct RecognitionResult {
+    /// 识别文本
+    pub text: String,
+    /// Token 列表（包含时间戳）
+    pub tokens: Vec<RecognizedToken>,
+}
+
+impl RecognitionResult {
+    /// 创建空结果
+    pub fn empty() -> Self {
+        Self {
+            text: String::new(),
+            tokens: Vec::new(),
+        }
+    }
+
+    /// 是否为空
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
 /// 在线识别器配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineRecognizerConfig {
     /// 模型目录路径
     pub model_dir: String,
     /// 采样率 (Hz)
+    #[serde(default = "default_sample_rate")]
     pub sample_rate: i32,
     /// 特征维度
+    #[serde(default = "default_feat_dim")]
     pub feat_dim: i32,
     /// 解码方法 ("greedy_search" 或 "modified_beam_search")
+    #[serde(default = "default_decoding_method")]
     pub decoding_method: String,
     /// 最大活跃路径数
+    #[serde(default = "default_max_active_paths")]
     pub max_active_paths: i32,
     /// 热词文件路径（可选）
+    #[serde(default)]
     pub hotwords_file: Option<String>,
     /// 热词得分
+    #[serde(default = "default_hotwords_score")]
     pub hotwords_score: f32,
 }
+
+// 默认值函数
+fn default_sample_rate() -> i32 { 16000 }
+fn default_feat_dim() -> i32 { 80 }
+fn default_decoding_method() -> String { "greedy_search".to_string() }
+fn default_max_active_paths() -> i32 { 4 }
+fn default_hotwords_score() -> f32 { 1.5 }
 
 impl Default for OnlineRecognizerConfig {
     fn default() -> Self {
@@ -230,12 +296,17 @@ impl<'a> OnlineStream<'a> {
         }
     }
 
-    /// 获取识别结果
+    /// 获取识别结果（仅文本）
     pub fn get_result(&self, recognizer: &OnlineRecognizer) -> String {
+        self.get_detailed_result(recognizer).text
+    }
+
+    /// 获取详细识别结果（包含 Token 和时间戳）
+    pub fn get_detailed_result(&self, recognizer: &OnlineRecognizer) -> RecognitionResult {
         unsafe {
             let result_ptr = SherpaOnnxGetOnlineStreamResult(recognizer.as_ptr(), self.inner);
             if result_ptr.is_null() {
-                return String::new();
+                return RecognitionResult::empty();
             }
 
             let text_ptr = (*result_ptr).text;
@@ -247,8 +318,50 @@ impl<'a> OnlineStream<'a> {
                 String::new()
             };
 
+            // 提取 Tokens 和时间戳
+            let mut tokens = Vec::new();
+            let count = (*result_ptr).count as usize;
+
+            if count > 0 && !(*result_ptr).tokens_arr.is_null() && !(*result_ptr).timestamps.is_null() {
+                let tokens_arr = std::slice::from_raw_parts((*result_ptr).tokens_arr, count);
+                let timestamps = std::slice::from_raw_parts((*result_ptr).timestamps, count);
+
+                // 调试：打印原始 timestamps 数组
+                tracing::debug!("📍 Sherpa-ONNX 原始 timestamps (秒): {:?}",
+                    timestamps.iter().take(count.min(20)).collect::<Vec<_>>());
+
+                for i in 0..count {
+                    if !tokens_arr[i].is_null() {
+                        let token_text = CStr::from_ptr(tokens_arr[i])
+                            .to_string_lossy()
+                            .into_owned();
+
+                        // timestamps[i] 是相对开始时间（秒）
+                        // 我们需要计算每个 token 的开始和结束时间
+                        let start_time_s = timestamps[i];
+                        let end_time_s = if i + 1 < count {
+                            timestamps[i + 1]
+                        } else {
+                            start_time_s + 0.2  // 最后一个 token，估计 200ms 时长
+                        };
+
+                        tokens.push(RecognizedToken {
+                            text: token_text,
+                            start_time_ms: (start_time_s * 1000.0) as u64,
+                            end_time_ms: (end_time_s * 1000.0) as u64,
+                            confidence: 1.0,  // Sherpa-ONNX 不提供置信度
+                        });
+                    }
+                }
+            }
+
+            let result = RecognitionResult {
+                text,
+                tokens,
+            };
+
             SherpaOnnxDestroyOnlineRecognizerResult(result_ptr);
-            text
+            result
         }
     }
 

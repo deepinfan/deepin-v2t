@@ -2,8 +2,9 @@
 //!
 //! 将 VAD 检测结果与 ASR 识别器连接，实现端到端的流式语音识别
 
-use crate::asr::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
+use crate::asr::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, RecognitionResult};
 use crate::error::VInputResult;
+use crate::punctuation::{PunctuationEngine, StyleProfile};
 use crate::vad::{VadConfig, VadManager, VadState};
 use std::time::Instant;
 
@@ -14,6 +15,8 @@ pub struct StreamingConfig {
     pub vad_config: VadConfig,
     /// ASR 配置
     pub asr_config: OnlineRecognizerConfig,
+    /// 标点风格配置
+    pub punctuation_profile: StyleProfile,
     /// 最大静音等待时间 (ms) - 超过此时间后强制结束识别
     pub max_silence_duration_ms: u64,
     /// 启用端点检测
@@ -25,6 +28,7 @@ impl Default for StreamingConfig {
         Self {
             vad_config: VadConfig::push_to_talk_default(),
             asr_config: OnlineRecognizerConfig::default(),
+            punctuation_profile: StyleProfile::default(),
             max_silence_duration_ms: 3000,
             enable_endpoint_detection: true,
         }
@@ -65,6 +69,7 @@ pub struct StreamingPipeline {
     vad_manager: VadManager,
     asr_recognizer: OnlineRecognizer,
     asr_stream: Option<OnlineStream<'static>>,
+    punctuation_engine: PunctuationEngine,
     pipeline_state: PipelineState,
 
     /// 语音开始时间
@@ -76,24 +81,34 @@ pub struct StreamingPipeline {
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
+    /// VAD 静音时长（毫秒）
+    vad_silence_ms: u64,
 }
 
 impl StreamingPipeline {
     /// 创建新的流式管道
     pub fn new(config: StreamingConfig) -> VInputResult<Self> {
+        tracing::info!("📍 StreamingPipeline::new - 接收到的标点配置: pause_ratio={}, min_tokens={}",
+            config.punctuation_profile.streaming_pause_ratio,
+            config.punctuation_profile.streaming_min_tokens
+        );
+
         let vad_manager = VadManager::new(config.vad_config.clone())?;
         let asr_recognizer = OnlineRecognizer::new(&config.asr_config)?;
+        let punctuation_engine = PunctuationEngine::new(config.punctuation_profile.clone());
 
         Ok(Self {
             config,
             vad_manager,
             asr_recognizer,
+            punctuation_engine,
             asr_stream: None,
             pipeline_state: PipelineState::Idle,
             speech_start_time: None,
             last_speech_time: None,
             total_frames: 0,
             asr_frames: 0,
+            vad_silence_ms: 0,
         })
     }
 
@@ -159,7 +174,12 @@ impl StreamingPipeline {
 
             // 检测到语音结束
             (PipelineState::Recognizing, VadState::Silence) if vad_result.state_changed => {
-                tracing::info!("Pipeline: Speech ended, finalizing ASR");
+                // 计算静音时长
+                if let Some(last_time) = self.last_speech_time {
+                    self.vad_silence_ms = now.duration_since(last_time).as_millis() as u64;
+                }
+
+                tracing::info!("Pipeline: Speech ended (silence: {}ms), finalizing ASR", self.vad_silence_ms);
 
                 if let Some(stream) = &mut self.asr_stream {
                     // 标记输入结束
@@ -266,10 +286,14 @@ impl StreamingPipeline {
         // 重置 VAD
         self.vad_manager.reset();
 
+        // 重置标点引擎
+        self.punctuation_engine.reset_sentence();
+
         // 重置状态
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
         self.last_speech_time = None;
+        self.vad_silence_ms = 0;
 
         Ok(())
     }
@@ -300,7 +324,74 @@ impl StreamingPipeline {
         }
     }
 
-    /// 获取最终识别结果
+    /// 获取最终识别结果（带标点）
+    ///
+    /// 调用此方法后会自动重置管道状态
+    pub fn get_final_result_with_punctuation(&mut self) -> String {
+        let result = if let Some(stream) = &self.asr_stream {
+            // 获取详细结果（包含 Token 和时间戳）
+            let detailed_result = stream.get_detailed_result(&self.asr_recognizer);
+
+            tracing::debug!("📊 识别结果详情: text='{}', token_count={}",
+                detailed_result.text, detailed_result.tokens.len());
+
+            if detailed_result.is_empty() {
+                tracing::warn!("⚠️  识别结果为空");
+                String::new()
+            } else {
+                // 打印所有 Token 信息
+                for (i, token) in detailed_result.tokens.iter().enumerate() {
+                    tracing::debug!("  Token[{}]: '{}' ({}ms - {}ms, duration={}ms)",
+                        i, token.text, token.start_time_ms, token.end_time_ms, token.duration_ms());
+                }
+
+                // 处理每个 Token，添加标点
+                let mut final_text = String::new();
+
+                for token in &detailed_result.tokens {
+                    // 转换为 TokenInfo
+                    let token_info = token.to_token_info();
+
+                    // 处理 Token（可能在前面添加逗号）
+                    if let Some(processed_token) = self.punctuation_engine.process_token(token_info) {
+                        tracing::debug!("  处理 Token: '{}' -> '{}'", token.text, processed_token);
+                        final_text.push_str(&processed_token);
+                    } else {
+                        tracing::debug!("  Token 被过滤: '{}'", token.text);
+                    }
+                }
+
+                // 检测 VAD 能量变化（用于问号检测）
+                // TODO: 实现真实的能量检测，目前暂时用 false
+                let energy_rising = false;
+
+                tracing::debug!("🔚 准备添加句尾标点: vad_silence_ms={}, energy_rising={}",
+                    self.vad_silence_ms, energy_rising);
+
+                // 添加句尾标点
+                let ending = self.punctuation_engine.finalize_sentence(
+                    self.vad_silence_ms,
+                    energy_rising,
+                );
+
+                tracing::debug!("  句尾标点: '{}'", ending);
+                final_text.push_str(&ending);
+
+                tracing::info!("✅ 标点处理完成: '{}'", final_text);
+                final_text
+            }
+        } else {
+            tracing::warn!("⚠️  ASR 流为空");
+            String::new()
+        };
+
+        // 重置管道以准备下一次识别
+        let _ = self.reset();
+
+        result
+    }
+
+    /// 获取最终识别结果（不带标点，原始文本）
     ///
     /// 调用此方法后会自动重置管道状态
     pub fn get_final_result(&mut self) -> String {

@@ -56,6 +56,7 @@ impl PauseEngine {
         let should_insert = self.should_insert_comma(&token);
 
         if should_insert {
+            tracing::debug!("  🎯 检测到停顿，将在 '{}' 前插入逗号", token.text);
             self.last_comma_position = Some(self.token_history.len());
         }
 
@@ -78,12 +79,16 @@ impl PauseEngine {
             }
         }
 
-        // 计算停顿时长
+        // Sherpa-ONNX 的 timestamps 是连续的，Token 之间没有间隙
+        // 停顿包含在上一个 Token 的时长中
+        // 因此我们检测上一个 Token 的时长是否异常长
         if let Some(last_token) = self.token_history.last() {
-            let pause_duration = token.start_ms.saturating_sub(last_token.end_ms);
+            let last_token_duration = last_token.duration_ms();
 
-            // 检查最小停顿时长
-            if pause_duration < self.profile.min_pause_duration_ms {
+            // 检查最小时长（避免误判短 Token）
+            if last_token_duration < self.profile.min_pause_duration_ms {
+                tracing::debug!("    ⏭  上一Token '{}' 时长 {}ms < 最小阈值 {}ms，跳过",
+                    last_token.text, last_token_duration, self.profile.min_pause_duration_ms);
                 return false;
             }
 
@@ -93,11 +98,15 @@ impl PauseEngine {
                 return false;
             }
 
-            // 计算停顿比例
-            let pause_ratio = pause_duration as f32 / avg_duration as f32;
+            // 计算时长比例（上一个 Token 的时长 / 平均时长）
+            let duration_ratio = last_token_duration as f32 / avg_duration as f32;
 
-            // 判断是否满足阈值
-            return pause_ratio > self.profile.streaming_pause_ratio;
+            tracing::debug!("    ⏱  停顿检测: 上一Token='{}' 时长={}ms, 平均={}ms, 比例={:.2}, 阈值={:.2}",
+                last_token.text, last_token_duration, avg_duration, duration_ratio, self.profile.streaming_pause_ratio);
+
+            // 如果上一个 Token 的时长显著超过平均值，说明包含了停顿
+            // 在当前 Token 前插入逗号
+            return duration_ratio > self.profile.streaming_pause_ratio;
         }
 
         false

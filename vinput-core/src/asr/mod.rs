@@ -4,4 +4,7 @@
 
 pub mod recognizer;
 
-pub use recognizer::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
+pub use recognizer::{
+    OnlineRecognizer, OnlineRecognizerConfig, OnlineStream,
+    RecognitionResult, RecognizedToken,
+};

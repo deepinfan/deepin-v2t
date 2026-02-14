@@ -26,6 +26,12 @@ pub struct PunctuationEngine {
 impl PunctuationEngine {
     /// 创建新的标点引擎
     pub fn new(profile: StyleProfile) -> Self {
+        tracing::info!("🎯 PunctuationEngine::new - 配置: pause_ratio={}, min_tokens={}, allow_exclamation={}",
+            profile.streaming_pause_ratio,
+            profile.streaming_min_tokens,
+            profile.allow_exclamation
+        );
+
         Self {
             pause_engine: PauseEngine::new(profile.clone()),
             rule_layer: RuleLayer::new(profile.clone()),

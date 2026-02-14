@@ -84,8 +84,14 @@ impl RuleLayer {
     ///
     /// 基于 VAD 段结束判定
     pub fn should_insert_period(&self, sentence: &str, vad_silence_duration_ms: u64) -> bool {
-        // 根据设计文档，结束静音 ≥ 800ms 才插入句号
-        vad_silence_duration_ms >= 800
+        // 如果 VAD 检测到静音（> 0），使用标准规则：≥ 800ms 才插入句号
+        if vad_silence_duration_ms > 0 {
+            return vad_silence_duration_ms >= 800;
+        }
+
+        // 如果是手动停止（vad_silence_duration_ms == 0），且句子不为空，也添加句号
+        // 这样用户手动结束时也能获得完整的标点
+        !sentence.is_empty()
     }
 
     /// 检查是否为逻辑连接词
