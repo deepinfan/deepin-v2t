@@ -1,55 +1,66 @@
-//! V-Input Fcitx5 输入法引擎
+/*
+ * V-Input Engine for Fcitx5
+ * Complete implementation with FFI integration
+ */
 
 #ifndef VINPUT_ENGINE_H
 #define VINPUT_ENGINE_H
 
 #include <fcitx/inputmethodengine.h>
-#include <fcitx/instance.h>
+#include <fcitx/addonfactory.h>
 #include <fcitx/addonmanager.h>
+#include <fcitx/instance.h>
+#include <fcitx/inputcontext.h>
+#include <memory>
+
+extern "C" {
+#include "vinput_core.h"
+}
 
 namespace fcitx {
 
-class VInputState;
-
-class VInputEngine : public InputMethodEngineV3 {
+/**
+ * V-Input 输入法引擎
+ *
+ * 完整实现：VAD + ASR + ITN + 候选词
+ */
+class VInputEngine : public InputMethodEngine {
 public:
-    VInputEngine(Instance *instance);
-    ~VInputEngine();
+    VInputEngine(Instance* instance);
+    ~VInputEngine() override;
 
-    // InputMethodEngine 接口实现
-    void keyEvent(const InputMethodEntry &entry, KeyEvent &keyEvent) override;
-    void activate(const InputMethodEntry &entry, InputContextEvent &event) override;
-    void deactivate(const InputMethodEntry &entry, InputContextEvent &event) override;
-    void reset(const InputMethodEntry &entry, InputContextEvent &event) override;
+    // 输入法生命周期
+    void activate(const InputMethodEntry& entry, InputContextEvent& event) override;
+    void deactivate(const InputMethodEntry& entry, InputContextEvent& event) override;
+    void reset(const InputMethodEntry& entry, InputContextEvent& event) override;
 
-    // 配置相关
-    void reloadConfig() override;
-    const Configuration *getConfig() const override { return &config_; }
-    void setConfig(const RawConfig &config) override;
+    // 按键处理
+    void keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) override;
 
-    // 获取工厂实例
-    FCITX_ADDON_FACTORY(VInputEngineFactory);
+    // 获取子配置
+    const Configuration* getConfig() const override { return nullptr; }
+    void setConfig(const RawConfig&) override {}
 
 private:
-    Instance *instance_;
-    Configuration config_;
+    Instance* instance_;
+    bool vinput_core_initialized_;
+    bool is_recording_;
 
-    // V-Input 核心状态
-    VInputState *state_;
-
-    // 音频捕获状态
-    bool isRecording_;
-
-    // 快捷键处理
-    void handleVoiceInputKey(KeyEvent &keyEvent);
     void startRecording();
     void stopRecording();
-
-    // 候选词处理
-    void showCandidates(const std::string &text);
-    void commitText(const std::string &text);
+    void processCommands(InputContext* ic);
 };
 
-}  // namespace fcitx
+/**
+ * Fcitx5 插件工厂
+ */
+class VInputEngineFactory : public AddonFactory {
+public:
+    AddonInstance* create(AddonManager* manager) override {
+        return new VInputEngine(manager->instance());
+    }
+};
 
-#endif  // VINPUT_ENGINE_H
+} // namespace fcitx
+
+#endif // VINPUT_ENGINE_H

@@ -8,15 +8,19 @@ namespace fcitx {
 VInputState::VInputState()
     : isRecording_(false),
       vinputCore_(nullptr) {
-    // TODO: 初始化 vinput-core
-    // vinputCore_ = vinput_core_new();
+    // 初始化 vinput-core
+    auto result = vinput_core_init();
+    if (result == VInputVInputFFIResult::Success) {
+        std::cout << "V-Input Core 初始化成功" << std::endl;
+        std::cout << "V-Input Core 版本: " << vinput_core_version() << std::endl;
+    } else {
+        std::cerr << "V-Input Core 初始化失败: " << static_cast<int>(result) << std::endl;
+    }
 }
 
 VInputState::~VInputState() {
-    if (vinputCore_) {
-        // TODO: 释放 vinput-core
-        // vinput_core_free(vinputCore_);
-    }
+    // 释放 vinput-core
+    vinput_core_shutdown();
 }
 
 bool VInputState::startCapture() {
@@ -24,12 +28,22 @@ bool VInputState::startCapture() {
         return false;
     }
 
-    // TODO: 调用 vinput-core 开始音频捕获
-    // vinput_core_start_capture(vinputCore_);
+    // 发送 StartRecording 事件
+    VInputVInputEvent event = {
+        .event_type = VInputVInputEventType::StartRecording,
+        .data = nullptr,
+        .data_len = 0
+    };
 
-    isRecording_ = true;
-    std::cout << "V-Input: 开始录音..." << std::endl;
-    return true;
+    auto result = vinput_core_send_event(&event);
+    if (result == VInputVInputFFIResult::Success) {
+        isRecording_ = true;
+        std::cout << "V-Input: 开始录音..." << std::endl;
+        return true;
+    } else {
+        std::cerr << "V-Input: 启动录音失败: " << static_cast<int>(result) << std::endl;
+        return false;
+    }
 }
 
 void VInputState::stopCapture() {
@@ -37,26 +51,69 @@ void VInputState::stopCapture() {
         return;
     }
 
-    // TODO: 调用 vinput-core 停止音频捕获
-    // vinput_core_stop_capture(vinputCore_);
+    // 发送 StopRecording 事件
+    VInputVInputEvent event = {
+        .event_type = VInputVInputEventType::StopRecording,
+        .data = nullptr,
+        .data_len = 0
+    };
 
-    isRecording_ = false;
-    std::cout << "V-Input: 停止录音" << std::endl;
+    auto result = vinput_core_send_event(&event);
+    if (result == VInputVInputFFIResult::Success) {
+        isRecording_ = false;
+        std::cout << "V-Input: 停止录音" << std::endl;
+    } else {
+        std::cerr << "V-Input: 停止录音失败: " << static_cast<int>(result) << std::endl;
+    }
 }
 
 std::string VInputState::getRecognitionResult() {
-    if (!vinputCore_) {
-        return "";
+    // 轮询命令队列，获取识别结果
+    VInputVInputCommand command;
+    std::string result;
+
+    while (true) {
+        auto res = vinput_core_try_recv_command(&command);
+
+        if (res == VInputVInputFFIResult::NoData) {
+            // 没有更多命令
+            break;
+        }
+
+        if (res != VInputVInputFFIResult::Success) {
+            std::cerr << "V-Input: 获取命令失败: " << static_cast<int>(res) << std::endl;
+            break;
+        }
+
+        // 处理命令
+        switch (command.command_type) {
+            case VInputVInputCommandType::CommitText:
+                if (command.text != nullptr) {
+                    result = std::string(command.text);
+                    std::cout << "V-Input: 收到文本: " << result << std::endl;
+                }
+                break;
+
+            case VInputVInputCommandType::ShowCandidate:
+                // 暂时忽略（未来用于候选词显示）
+                break;
+
+            case VInputVInputCommandType::HideCandidate:
+                // 暂时忽略
+                break;
+
+            case VInputVInputCommandType::Error:
+                if (command.text != nullptr) {
+                    std::cerr << "V-Input: 错误: " << command.text << std::endl;
+                }
+                break;
+        }
+
+        // 释放命令资源
+        vinput_command_free(&command);
     }
 
-    // TODO: 从 vinput-core 获取识别结果
-    // const char* result = vinput_core_get_result(vinputCore_);
-    // if (result) {
-    //     return std::string(result);
-    // }
-
-    // 临时返回测试文本
-    return "你好世界";
+    return result;
 }
 
 }  // namespace fcitx
