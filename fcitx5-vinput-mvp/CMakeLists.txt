@@ -44,6 +44,10 @@ install(TARGETS vinput DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
 install(FILES vinput.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/addon)
 install(FILES vinput-im.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod)
 
+# 安装 Rust 核心库
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../target/release/libvinput_core.so
+        DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
 # 调试信息
 message(STATUS "Fcitx5 Core include: ${FCITX5_CORE_INCLUDE_DIRS}")
 message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
