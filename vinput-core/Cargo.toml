@@ -28,6 +28,9 @@ regex.workspace = true
 # PipeWire (audio capture)
 pipewire = "0.9"
 
+# Configuration and file paths
+dirs = "6.0"
+
 # ONNX Runtime (for VAD inference in Phase 1)
 # Use system ONNX Runtime (already installed at /usr/local/lib)
 # Avoid download-binaries to skip OpenSSL dependency

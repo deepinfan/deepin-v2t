@@ -299,6 +299,22 @@ impl StreamingPipeline {
                 .unwrap_or(0),
         }
     }
+
+    /// 获取最终识别结果
+    ///
+    /// 调用此方法后会自动重置管道状态
+    pub fn get_final_result(&mut self) -> String {
+        let result = if let Some(stream) = &self.asr_stream {
+            stream.get_result(&self.asr_recognizer)
+        } else {
+            String::new()
+        };
+
+        // 重置管道以准备下一次识别
+        let _ = self.reset();
+
+        result
+    }
 }
 
 impl Drop for StreamingPipeline {

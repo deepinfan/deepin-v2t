@@ -17,3 +17,6 @@ pub mod rules;
 pub use config::StyleProfile;
 pub use engine::PunctuationEngine;
 pub use pause_engine::TokenInfo;
+
+/// 标点配置（别名）
+pub type PunctuationConfig = StyleProfile;

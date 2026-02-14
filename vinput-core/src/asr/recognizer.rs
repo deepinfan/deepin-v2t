@@ -1,6 +1,7 @@
 //! sherpa-onnx 在线识别器安全封装
 
 use crate::error::{VInputError, VInputResult};
+use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::ptr;
@@ -9,7 +10,7 @@ use std::ptr;
 include!(concat!(env!("OUT_DIR"), "/sherpa_bindings.rs"));
 
 /// 在线识别器配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnlineRecognizerConfig {
     /// 模型目录路径
     pub model_dir: String,
@@ -198,6 +199,11 @@ pub struct OnlineStream<'a> {
     inner: *const SherpaOnnxOnlineStream,
     _recognizer: std::marker::PhantomData<&'a OnlineRecognizer>,
 }
+
+// sherpa-onnx 的 stream 是线程安全的
+// 虽然它是裸指针，但 C 库保证了线程安全性
+unsafe impl Send for OnlineStream<'_> {}
+unsafe impl Sync for OnlineStream<'_> {}
 
 impl<'a> OnlineStream<'a> {
     /// 输入音频数据（16kHz, 单声道, f32 格式）
