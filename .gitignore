@@ -88,3 +88,5 @@ test_fcitx5_ffi
 tmp/
 temp/
 *.tmp
+test_multi_commands
+test_error_handling
