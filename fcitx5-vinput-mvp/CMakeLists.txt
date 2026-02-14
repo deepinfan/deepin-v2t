@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 查找 Fcitx5
 find_package(Fcitx5Core REQUIRED)
-find_package(Fcitx5Module REQUIRED)
+# Fcitx5Module 不是必需的，移除以避免组件要求错误
+# find_package(Fcitx5Module REQUIRED)
 find_package(PkgConfig REQUIRED)
 
 # 包含目录

@@ -16,7 +16,7 @@ VInputEngine::VInputEngine(Instance* instance)
 
     // 初始化 V-Input Core (FFI)
     VInputVInputFFIResult result = vinput_core_init();
-    if (result == Success) {
+    if (result == VInputVInputFFIResult::Success) {
         vinput_core_initialized_ = true;
         const char* version = vinput_core_version();
         FCITX_INFO() << "V-Input Core 初始化成功, version: " << version;
@@ -33,7 +33,7 @@ VInputEngine::~VInputEngine() {
     // 关闭 V-Input Core (FFI)
     if (vinput_core_initialized_) {
         VInputVInputFFIResult result = vinput_core_shutdown();
-        if (result == Success) {
+        if (result == VInputVInputFFIResult::Success) {
             FCITX_INFO() << "V-Input Core 关闭成功";
         } else {
             FCITX_ERROR() << "V-Input Core 关闭失败: " << result;
@@ -97,7 +97,7 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                 stop_event.data_len = 0;
 
                 VInputVInputFFIResult result = vinput_core_send_event(&stop_event);
-                if (result == Success) {
+                if (result == VInputVInputFFIResult::Success) {
                     FCITX_INFO() << "停止录音事件已发送";
 
                     // 获取输入上下文
@@ -108,7 +108,7 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                         VInputVInputCommand command;
                         result = vinput_core_try_recv_command(&command);
 
-                        if (result == Success) {
+                        if (result == VInputVInputFFIResult::Success) {
                             // 处理命令
                             std::string text;
                             if (command.text != nullptr && command.text_len > 0) {
@@ -116,24 +116,24 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                             }
 
                             switch (command.command_type) {
-                                case CommitText:
+                                case VInputVInputCommandType::CommitText:
                                     FCITX_INFO() << "CommitText: " << text;
                                     inputContext->commitString(text);
                                     break;
 
-                                case ShowCandidate:
+                                case VInputVInputCommandType::ShowCandidate:
                                     FCITX_INFO() << "ShowCandidate: " << text;
                                     // TODO: 显示候选词列表
                                     // inputContext->inputPanel().setCandidateList(...);
                                     break;
 
-                                case HideCandidate:
+                                case VInputVInputCommandType::HideCandidate:
                                     FCITX_INFO() << "HideCandidate";
                                     // TODO: 隐藏候选词列表
                                     // inputContext->inputPanel().reset();
                                     break;
 
-                                case Error:
+                                case VInputVInputCommandType::Error:
                                     FCITX_ERROR() << "Error: " << text;
                                     // TODO: 显示错误消息
                                     break;
@@ -147,7 +147,7 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                             // 释放命令资源
                             vinput_command_free(&command);
 
-                        } else if (result == NoData) {
+                        } else if (result == VInputVInputFFIResult::NoData) {
                             // 无更多命令
                             break;
                         } else {
@@ -174,7 +174,7 @@ void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
                 start_event.data_len = 0;
 
                 VInputVInputFFIResult result = vinput_core_send_event(&start_event);
-                if (result == Success) {
+                if (result == VInputVInputFFIResult::Success) {
                     FCITX_INFO() << "开始录音事件已发送";
                     // 消费此按键事件
                     return keyEvent.filterAndAccept();
