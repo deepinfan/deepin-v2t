@@ -60,7 +60,10 @@ enum Tab {
 }
 
 impl VInputApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // 配置中文字体支持
+        Self::setup_custom_fonts(&cc.egui_ctx);
+
         // 加载配置
         let config = VInputConfig::load().unwrap_or_default();
 
@@ -72,6 +75,50 @@ impl VInputApp {
             config,
             config_modified: false,
         }
+    }
+
+    /// 设置中文字体支持
+    fn setup_custom_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+
+        // 尝试加载系统中文字体
+        let font_paths = [
+            "/usr/share/fonts/opentype/source-han-cjk/SourceHanSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy-microhei/wqy-microhei.ttc",
+        ];
+
+        let mut font_loaded = false;
+        for font_path in &font_paths {
+            if let Ok(font_data) = std::fs::read(font_path) {
+                fonts.font_data.insert(
+                    "chinese_font".to_owned(),
+                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                );
+                font_loaded = true;
+                tracing::info!("Loaded Chinese font from: {}", font_path);
+                break;
+            }
+        }
+
+        if font_loaded {
+            // 将中文字体添加到字体族首位（优先使用）
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "chinese_font".to_owned());
+
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .insert(0, "chinese_font".to_owned());
+        } else {
+            tracing::warn!("No Chinese font found, using default fonts");
+        }
+
+        ctx.set_fonts(fonts);
     }
 
     fn save_config(&mut self) {
