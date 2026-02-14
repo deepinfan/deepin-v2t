@@ -8,41 +8,63 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StyleProfile {
     /// Streaming 阶段停顿比例阈值
+    #[serde(alias = "pause_ratio")]
     pub streaming_pause_ratio: f32,
 
     /// Streaming 阶段最小 token 数
+    #[serde(alias = "min_tokens")]
     pub streaming_min_tokens: usize,
 
     /// 距离上次逗号的最小 token 数
+    #[serde(default = "default_min_tokens_between_commas")]
     pub min_tokens_between_commas: usize,
 
     /// 最小停顿时长（毫秒）
+    #[serde(default = "default_min_pause_duration_ms")]
     pub min_pause_duration_ms: u64,
 
     /// 是否允许感叹号
     pub allow_exclamation: bool,
 
     /// 问号严格模式
+    #[serde(alias = "question_strict")]
     pub question_strict_mode: bool,
 
     /// 逻辑连接词插入强度 (0.0 - 2.0)
+    #[serde(default = "default_logic_word_strength")]
     pub logic_word_strength: f32,
 
     /// 逻辑连接词插入最小 token 数
+    #[serde(default = "default_logic_word_min_tokens")]
     pub logic_word_min_tokens: usize,
 }
 
+// 默认值函数（用于 serde）
+fn default_min_tokens_between_commas() -> usize { 4 }
+fn default_min_pause_duration_ms() -> u64 { 500 }
+fn default_logic_word_strength() -> f32 { 0.8 }
+fn default_logic_word_min_tokens() -> usize { 8 }
+
 impl StyleProfile {
-    /// Professional 风格（默认，推荐）
+    /// 从预设名称创建（忽略配置文件，仅用于测试）
+    pub fn from_preset(preset: &str) -> Self {
+        match preset {
+            "Balanced" => Self::balanced_preset(),
+            "Expressive" => Self::expressive_preset(),
+            _ => Self::professional_preset(),
+        }
+    }
+
+    /// Professional 风格（默认，推荐）- 预设值
     ///
     /// 特点：
     /// - 稳重克制，适合办公、技术文档、会议记录
     /// - 标点精简，避免过度标注
     /// - 逻辑连接词谨慎插入
     /// - 问号需严格匹配
-    pub fn professional() -> Self {
+    fn professional_preset() -> Self {
         Self {
-            streaming_pause_ratio: 3.5,
+            streaming_pause_ratio: 2.5,  // 降低阈值以适应实际停顿检测
             streaming_min_tokens: 6,
             min_tokens_between_commas: 4,
             min_pause_duration_ms: 500,
@@ -53,13 +75,13 @@ impl StyleProfile {
         }
     }
 
-    /// Balanced 风格（可选）
+    /// Balanced 风格（可选）- 预设值
     ///
     /// 特点：
     /// - 更自然，标点略多
     /// - 接近人工书写习惯
     /// - 问号检测宽松
-    pub fn balanced() -> Self {
+    fn balanced_preset() -> Self {
         Self {
             streaming_pause_ratio: 2.8,
             streaming_min_tokens: 4,
@@ -72,14 +94,14 @@ impl StyleProfile {
         }
     }
 
-    /// Expressive 风格（可选）
+    /// Expressive 风格（可选）- 预设值
     ///
     /// 特点：
     /// - 情绪表达明显
     /// - 接近口语化
     /// - 允许感叹号
     /// - 标点丰富
-    pub fn expressive() -> Self {
+    fn expressive_preset() -> Self {
         Self {
             streaming_pause_ratio: 2.2,
             streaming_min_tokens: 3,
@@ -95,7 +117,7 @@ impl StyleProfile {
 
 impl Default for StyleProfile {
     fn default() -> Self {
-        Self::professional()
+        Self::professional_preset()
     }
 }
 
@@ -105,8 +127,8 @@ mod tests {
 
     #[test]
     fn test_professional_profile() {
-        let profile = StyleProfile::professional();
-        assert_eq!(profile.streaming_pause_ratio, 3.5);
+        let profile = StyleProfile::professional_preset();
+        assert_eq!(profile.streaming_pause_ratio, 2.5);
         assert_eq!(profile.streaming_min_tokens, 6);
         assert!(!profile.allow_exclamation);
         assert!(profile.question_strict_mode);
@@ -114,14 +136,14 @@ mod tests {
 
     #[test]
     fn test_balanced_profile() {
-        let profile = StyleProfile::balanced();
+        let profile = StyleProfile::balanced_preset();
         assert_eq!(profile.streaming_pause_ratio, 2.8);
         assert_eq!(profile.streaming_min_tokens, 4);
     }
 
     #[test]
     fn test_expressive_profile() {
-        let profile = StyleProfile::expressive();
+        let profile = StyleProfile::expressive_preset();
         assert_eq!(profile.streaming_pause_ratio, 2.2);
         assert!(profile.allow_exclamation);
     }
@@ -129,7 +151,7 @@ mod tests {
     #[test]
     fn test_default_is_professional() {
         let default_profile = StyleProfile::default();
-        let professional = StyleProfile::professional();
+        let professional = StyleProfile::professional_preset();
 
         assert_eq!(default_profile.streaming_pause_ratio, professional.streaming_pause_ratio);
         assert_eq!(default_profile.streaming_min_tokens, professional.streaming_min_tokens);

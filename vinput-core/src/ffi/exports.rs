@@ -44,12 +44,27 @@ impl VInputCoreState {
         tracing::info!("初始化 V-Input Core (完整版本)");
 
         // 加载配置
-        let config = VInputConfig::load().unwrap_or_default();
+        let config = match VInputConfig::load() {
+            Ok(cfg) => {
+                tracing::info!("✅ 成功加载配置文件");
+                cfg
+            }
+            Err(e) => {
+                tracing::error!("❌ 加载配置文件失败: {}，使用默认配置", e);
+                VInputConfig::default()
+            }
+        };
 
         // 创建流式管道
+        tracing::info!("🔧 创建 StreamingPipeline，标点配置: pause_ratio={}, min_tokens={}",
+            config.punctuation.streaming_pause_ratio,
+            config.punctuation.streaming_min_tokens
+        );
+
         let streaming_config = StreamingConfig {
             vad_config: config.vad.clone(),
             asr_config: config.asr.clone(),
+            punctuation_profile: config.punctuation.clone(),
             max_silence_duration_ms: 3000,
             enable_endpoint_detection: true,
         };
@@ -212,24 +227,23 @@ impl VInputCoreState {
             let _ = handle.join();
         }
 
-        // 获取识别结果
-        let raw_result = if let Ok(mut pipe) = self.pipeline.lock() {
-            pipe.get_final_result()
+        // 获取识别结果（带智能标点）
+        let raw_result_with_punct = if let Ok(mut pipe) = self.pipeline.lock() {
+            pipe.get_final_result_with_punctuation()
         } else {
             String::new()
         };
 
-        if raw_result.is_empty() {
+        if raw_result_with_punct.is_empty() {
             tracing::info!("识别结果为空，不生成命令");
             return;
         }
 
-        tracing::info!("🎤 原始识别结果: [{}]", raw_result);
+        tracing::info!("🎤 识别结果（含智能标点）: [{}]", raw_result_with_punct);
 
-        // 应用后处理
-        // 1. ITN (文本规范化)
+        // 应用 ITN (文本规范化)
         tracing::info!("📝 开始 ITN 处理...");
-        let itn_result = self.itn_engine.process(&raw_result);
+        let itn_result = self.itn_engine.process(&raw_result_with_punct);
         let final_result = itn_result.text;
 
         if !itn_result.changes.is_empty() {
@@ -241,30 +255,16 @@ impl VInputCoreState {
             tracing::info!("📋 ITN: 无需变更（输入已是规范格式）");
         }
 
-        tracing::info!("📄 ITN 后: [{}]", final_result);
-
-        // 2. 标点处理（临时方案：简单添加句号）
-        // TODO: 集成完整的 PunctuationEngine（需要流式 token 信息）
-        let mut final_result_with_punct = final_result.clone();
-        if !final_result_with_punct.is_empty() && !final_result_with_punct.ends_with(&['。', '！', '？', '.', '!', '?'][..]) {
-            final_result_with_punct.push('。');
-            tracing::info!("✏️  自动添加句号");
-        }
-
-        // 注意：
-        // - 标点控制应该在流式识别过程中应用（通过 TokenInfo），而不是在最终文本上
-        // - 热词增强应该在创建 ASR 流时设置 hotwords_file，而不是后处理
-
-        tracing::info!("✅ 最终结果: [{}]", final_result_with_punct);
+        tracing::info!("✅ 最终结果: [{}]", final_result);
 
         // 生成命令序列
         // 1. 显示候选词（可以有多个候选）
         self.command_queue
-            .push_back(VInputCommand::show_candidate(&final_result_with_punct));
+            .push_back(VInputCommand::show_candidate(&final_result));
 
         // 2. 提交最终文本
         self.command_queue
-            .push_back(VInputCommand::commit_text(&final_result_with_punct));
+            .push_back(VInputCommand::commit_text(&final_result));
 
         // 3. 隐藏候选词
         self.command_queue

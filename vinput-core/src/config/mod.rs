@@ -53,7 +53,12 @@ impl VInputConfig {
         let content = std::fs::read_to_string(&config_path)?;
         let config: Self = toml::from_str(&content)?;
 
-        tracing::info!("加载配置成功: {:?}", config_path);
+        tracing::info!("📋 加载配置成功: {:?}", config_path);
+        tracing::info!("📊 标点配置: pause_ratio={}, min_tokens={}, allow_exclamation={}",
+            config.punctuation.streaming_pause_ratio,
+            config.punctuation.streaming_min_tokens,
+            config.punctuation.allow_exclamation
+        );
         Ok(config)
     }
 

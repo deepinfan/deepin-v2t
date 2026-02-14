@@ -20,19 +20,67 @@ pub struct VadConfig {
     pub mode: InputMode,
 
     /// Silero VAD 配置
+    #[serde(default = "default_silero_config")]
     pub silero: SileroConfig,
 
     /// Energy Gate 配置
+    #[serde(default = "default_energy_gate_config")]
     pub energy_gate: EnergyGateConfig,
 
     /// 迟滞控制器配置
+    #[serde(default = "default_hysteresis_config")]
     pub hysteresis: HysteresisConfig,
 
     /// Pre-roll Buffer 配置
+    #[serde(default = "default_pre_roll_config")]
     pub pre_roll: PreRollConfig,
 
     /// 短爆发过滤器配置
+    #[serde(default = "default_transient_filter_config")]
     pub transient_filter: TransientFilterConfig,
+}
+
+// 默认值函数
+fn default_silero_config() -> SileroConfig {
+    SileroConfig {
+        model_path: "models/silero-vad/silero_vad.onnx".to_string(),
+        sample_rate: 16000,
+        frame_size: 512,
+    }
+}
+
+fn default_energy_gate_config() -> EnergyGateConfig {
+    EnergyGateConfig {
+        enabled: true,
+        noise_multiplier: 2.5,
+        baseline_alpha: 0.95,
+        initial_baseline: 0.001,
+    }
+}
+
+fn default_hysteresis_config() -> HysteresisConfig {
+    HysteresisConfig {
+        start_threshold: 0.6,
+        end_threshold: 0.35,
+        min_speech_duration_ms: 100,
+        min_silence_duration_ms: 500,
+    }
+}
+
+fn default_pre_roll_config() -> PreRollConfig {
+    PreRollConfig {
+        enabled: true,
+        duration_ms: 250,
+        capacity: 4000,
+    }
+}
+
+fn default_transient_filter_config() -> TransientFilterConfig {
+    TransientFilterConfig {
+        enabled: true,
+        max_duration_ms: 80,
+        rms_threshold: 0.05,
+    }
 }
 
 /// Silero VAD 配置
