@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]  # cdylib for FFI, rlib for examples/tests
 default = []
 debug-logs = ["tracing-subscriber", "tracing-journald"]
 vad-onnx = ["ort"]  # VAD ONNX 推理功能
+pipewire-capture = []  # 真实 PipeWire 音频捕获（需要 PipeWire 环境）
 
 [dependencies]
 # Workspace dependencies

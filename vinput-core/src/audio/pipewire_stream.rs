@@ -133,25 +133,33 @@ impl Drop for PipeWireStream {
 /// PipeWire 主循环（运行在独立线程）
 fn run_pipewire_loop(
     config: PipeWireStreamConfig,
-    mut producer: AudioRingProducer,
+    producer: AudioRingProducer,
     running: Arc<AtomicBool>,
     quit_signal: Arc<AtomicBool>,
 ) -> VInputResult<()> {
     tracing::info!("PipeWire 流线程启动");
 
-    // Phase 1.1: 基础实现 - 使用 pipewire crate 的低级 API
-    // TODO: 完整的 PipeWire 集成需要处理：
-    // - 设备枚举
-    // - 实际音频捕获
-    // - 格式转换
-    // - 错误恢复
+    #[cfg(feature = "pipewire-capture")]
+    return run_real_pipewire_loop(config, producer, running, quit_signal);
 
-    // 当前为占位实现，需要在有实际 PipeWire 环境时完善
-    tracing::warn!("PipeWire 实际集成待完善 - 当前运行模拟模式");
+    #[cfg(not(feature = "pipewire-capture"))]
+    return run_simulated_pipewire_loop(config, producer, running, quit_signal);
+}
+
+/// 模拟 PipeWire 主循环（用于开发和测试）
+#[cfg(not(feature = "pipewire-capture"))]
+fn run_simulated_pipewire_loop(
+    config: PipeWireStreamConfig,
+    mut producer: AudioRingProducer,
+    running: Arc<AtomicBool>,
+    quit_signal: Arc<AtomicBool>,
+) -> VInputResult<()> {
+    tracing::warn!("PipeWire 模拟模式 - 生成静音音频");
+    tracing::warn!("要使用真实音频捕获，请使用 --features pipewire-capture 编译");
 
     running.store(true, Ordering::Release);
 
-    // 模拟音频捕获（Phase 1.1 临时实现）
+    // 模拟音频捕获
     let mut sample_count = 0u64;
     while !quit_signal.load(Ordering::Acquire) {
         thread::sleep(Duration::from_millis(32)); // 模拟 32ms 音频帧
@@ -164,7 +172,7 @@ fn run_pipewire_loop(
             Ok(written) => {
                 sample_count += written as u64;
                 if sample_count % (config.sample_rate as u64) == 0 {
-                    tracing::trace!("已捕获 {} 秒音频", sample_count / config.sample_rate as u64);
+                    tracing::trace!("模拟捕获: {} 秒", sample_count / config.sample_rate as u64);
                 }
             }
             Err(e) => {
@@ -174,7 +182,129 @@ fn run_pipewire_loop(
     }
 
     running.store(false, Ordering::Release);
-    tracing::info!("PipeWire 流线程停止，共捕获 {:.2} 秒音频", sample_count as f32 / config.sample_rate as f32);
+    tracing::info!("PipeWire 模拟流停止，共生成 {:.2} 秒音频",
+        sample_count as f32 / config.sample_rate as f32);
+
+    Ok(())
+}
+
+/// 真实 PipeWire 主循环（需要 PipeWire 环境）
+#[cfg(feature = "pipewire-capture")]
+fn run_real_pipewire_loop(
+    config: PipeWireStreamConfig,
+    producer: AudioRingProducer,
+    running: Arc<AtomicBool>,
+    quit_signal: Arc<AtomicBool>,
+) -> VInputResult<()> {
+    use pipewire::{
+        properties,
+        spa::{
+            param::audio::{AudioFormat as SpaAudioFormat, AudioInfoRaw},
+            utils::Direction,
+        },
+        stream::{Stream, StreamFlags},
+        Context, MainLoop,
+    };
+    use std::sync::Mutex;
+
+    tracing::info!("PipeWire 真实音频捕获模式");
+
+    // 初始化 PipeWire
+    pipewire::init();
+
+    // 创建主循环
+    let mainloop = MainLoop::new(None)
+        .map_err(|e| VInputError::PipeWire(format!("创建主循环失败: {}", e)))?;
+    let context = Context::new(&mainloop)
+        .map_err(|e| VInputError::PipeWire(format!("创建上下文失败: {}", e)))?;
+    let core = context.connect(None)
+        .map_err(|e| VInputError::PipeWire(format!("连接 PipeWire 失败: {}", e)))?;
+
+    // 创建音频流
+    let stream_props = properties! {
+        "media.type" => "Audio",
+        "media.category" => "Capture",
+        "media.role" => "Communication",
+        "app.name" => config.app_name.as_str(),
+    };
+
+    let stream = Stream::new(&core, config.stream_name.as_str(), stream_props)
+        .map_err(|e| VInputError::PipeWire(format!("创建流失败: {}", e)))?;
+
+    // 设置音频参数
+    let audio_info = AudioInfoRaw::new()
+        .format(match config.format {
+            AudioFormat::F32LE => SpaAudioFormat::F32LE,
+            AudioFormat::S16LE => SpaAudioFormat::S16LE,
+        })
+        .rate(config.sample_rate)
+        .channels(config.channels);
+
+    // 使用 Arc<Mutex> 包装 producer 以便在回调中使用
+    let producer_shared = Arc::new(Mutex::new(producer));
+    let producer_for_callback = producer_shared.clone();
+
+    // 注册流事件监听器
+    let _listener = stream
+        .add_local_listener()
+        .process({
+            let producer = producer_for_callback;
+            move |stream| {
+                // 获取音频缓冲区
+                if let Some(mut buffer) = stream.dequeue_buffer() {
+                    let datas = buffer.datas_mut();
+                    if !datas.is_empty() {
+                        // 获取第一个数据块
+                        let data = &datas[0];
+                        if let Some(chunk) = data.chunk() {
+                            let size = chunk.size();
+
+                            if size > 0 {
+                                // 读取音频数据
+                                if let Some(slice) = data.data() {
+                                    let samples = unsafe {
+                                        std::slice::from_raw_parts(
+                                            slice.as_ptr() as *const f32,
+                                            size as usize / std::mem::size_of::<f32>(),
+                                        )
+                                    };
+
+                                    // 写入 Ring Buffer
+                                    if let Ok(mut prod) = producer.lock() {
+                                        if let Err(e) = prod.write(samples) {
+                                            tracing::warn!("Ring Buffer 写入失败: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .register()
+        .map_err(|e| VInputError::PipeWire(format!("注册监听器失败: {}", e)))?;
+
+    // 连接流
+    let mut params = vec![audio_info.into()];
+    stream.connect(
+        Direction::Input,
+        None, // 使用默认音频源
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
+        &mut params,
+    )
+    .map_err(|e| VInputError::PipeWire(format!("连接流失败: {}", e)))?;
+
+    tracing::info!("PipeWire 流已连接，开始捕获真实音频");
+    running.store(true, Ordering::Release);
+
+    // 运行主循环
+    while !quit_signal.load(Ordering::Acquire) {
+        mainloop.iterate(Duration::from_millis(10));
+    }
+
+    running.store(false, Ordering::Release);
+    tracing::info!("PipeWire 流线程停止");
 
     Ok(())
 }
