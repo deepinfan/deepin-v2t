@@ -30,6 +30,14 @@ pub enum VInputError {
     #[error("VAD inference failed: {0}")]
     VadInference(String),
 
+    // ITN 错误
+    #[error("ITN conversion failed: {0}")]
+    ItnConversion(String),
+
+    // 热词错误
+    #[error("Hotwords error: {0}")]
+    Hotword(String),
+
     // 状态机错误
     #[error("Invalid state transition: {from} + {event}")]
     InvalidTransition { from: String, event: String },
@@ -109,6 +117,8 @@ impl VInputError {
             // 中等严重度：影响功能但可降级
             VInputError::AudioDeviceNotFound(_) => ErrorSeverity::Medium,
             VInputError::VadInference(_) => ErrorSeverity::Medium,
+            VInputError::ItnConversion(_) => ErrorSeverity::Medium,
+            VInputError::Hotword(_) => ErrorSeverity::Medium,
             VInputError::EmptyUndoHistory | VInputError::UndoTimeWindowExpired { .. } => {
                 ErrorSeverity::Medium
             }
@@ -144,6 +154,7 @@ impl VInputError {
             // 可降级的错误
             VInputError::AudioDeviceNotFound(_) => RecoveryStrategy::Degrade,
             VInputError::RingBufferOverrun { .. } => RecoveryStrategy::Degrade,
+            VInputError::ItnConversion(_) | VInputError::Hotword(_) => RecoveryStrategy::Degrade,
 
             // 需要用户干预
             VInputError::ModelLoad { .. }
@@ -190,6 +201,12 @@ impl VInputError {
             VInputError::VadInference(msg) => {
                 format!("语音检测失败：{}。请重试", msg)
             }
+            VInputError::ItnConversion(msg) => {
+                format!("文本规范化失败：{}。将保留原始文本", msg)
+            }
+            VInputError::Hotword(msg) => {
+                format!("热词加载失败：{}。将使用默认配置", msg)
+            }
             VInputError::InvalidTransition { from, event } => {
                 format!("操作顺序错误：当前状态 {} 不支持操作 {}", from, event)
             }
@@ -234,8 +251,10 @@ impl VInputError {
             VInputError::RecognizerNotReady => "E2003",
             VInputError::VadModelLoad(_) => "E3001",
             VInputError::VadInference(_) => "E3002",
-            VInputError::InvalidTransition { .. } => "E4001",
-            VInputError::NotAllowedInState { .. } => "E4002",
+            VInputError::ItnConversion(_) => "E4001",
+            VInputError::Hotword(_) => "E4002",
+            VInputError::InvalidTransition { .. } => "E4003",
+            VInputError::NotAllowedInState { .. } => "E4004",
             VInputError::ConfigParse { .. } => "E5001",
             VInputError::ConfigNotFound(_) => "E5002",
             VInputError::ChannelSend => "E6001",

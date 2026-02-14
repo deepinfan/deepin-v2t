@@ -4,6 +4,8 @@
 
 pub mod ring_buffer;
 pub mod pipewire_stream;
+pub mod audio_queue;
 
 pub use ring_buffer::{AudioRingBuffer, AudioRingBufferConfig, AudioRingConsumer, AudioRingProducer};
 pub use pipewire_stream::{PipeWireStream, PipeWireStreamConfig};
+pub use audio_queue::{AudioQueueManager, AudioQueueConfig, AudioQueueStats};

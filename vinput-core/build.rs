@@ -23,6 +23,14 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=sherpa-onnx-c-api");
     println!("cargo:rustc-link-lib=dylib=onnxruntime");
 
+    // 为 ort-sys 设置 ONNX Runtime 库路径
+    // 这样 ort crate 可以找到 libonnxruntime.so
+    let ort_lib_path = format!("{}/lib", sherpa_dir);
+    println!("cargo:rustc-env=ORT_LIB_LOCATION={}", ort_lib_path);
+
+    // 设置运行时库路径
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}/lib", sherpa_dir);
+
     // 生成 sherpa-onnx Rust 绑定
     let bindings_path = PathBuf::from(env::var("OUT_DIR").unwrap())
         .join("sherpa_bindings.rs");

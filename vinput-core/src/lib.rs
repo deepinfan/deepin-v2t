@@ -9,6 +9,7 @@ pub mod ffi;
 pub mod audio;
 pub mod vad;
 pub mod asr;
+pub mod streaming;
 pub mod state_machine;
 pub mod endpointing;
 pub mod itn;

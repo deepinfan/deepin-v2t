@@ -34,6 +34,9 @@ pipewire = "0.9"
 # Enable with: cargo build --features vad-onnx
 ort = { version = "2.0.0-rc.11", default-features = false, optional = true }
 
+# ITN (Inverse Text Normalization)
+# 注意：cn2an-rs 可能不存在于 crates.io，我们将手动实现中文数字转换
+
 # 日志输出 (可选，仅在 debug-logs feature 启用时)
 tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter"] }
 tracing-journald = { version = "0.3", optional = true }
@@ -46,3 +49,4 @@ cbindgen = "0.28"
 # 用于测试和示例
 hound = "3.5"  # WAV 文件读写
 ctrlc = "3.4"  # Ctrl+C 信号处理
+tempfile = "3.13"  # 临时文件（用于测试）

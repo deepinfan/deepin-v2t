@@ -1,0 +1,30 @@
+[package]
+name = "vinput-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vinput-settings"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+vinput-core = { path = "../vinput-core" }
+
+# egui 相关
+eframe = "0.31"  # egui 框架
+egui = "0.31"    # egui 核心
+egui_extras = { version = "0.31", features = ["file", "image"] }
+
+# 配置文件
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
+
+# 文件操作
+dirs = "6.0"
+
+# 日志
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
