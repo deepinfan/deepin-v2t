@@ -24,9 +24,16 @@ pub struct VInputConfig {
 
 impl Default for VInputConfig {
     fn default() -> Self {
+        // 默认模型路径
+        let default_model_dir = std::env::var("VINPUT_MODEL_DIR")
+            .unwrap_or_else(|_| "/home/deepin/deepin-v2t/models/streaming".to_string());
+
+        let mut asr_config = OnlineRecognizerConfig::default();
+        asr_config.model_dir = default_model_dir;
+
         Self {
             vad: VadConfig::push_to_talk_default(),
-            asr: OnlineRecognizerConfig::default(),
+            asr: asr_config,
             punctuation: PunctuationConfig::default(),
             hotwords: HotwordsConfig::default(),
         }

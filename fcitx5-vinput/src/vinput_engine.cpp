@@ -64,23 +64,34 @@ void VInputEngine::reset(const InputMethodEntry& entry, InputContextEvent& event
 }
 
 void VInputEngine::keyEvent(const InputMethodEntry& entry, KeyEvent& keyEvent) {
-    FCITX_DEBUG() << "V-Input: keyEvent - " << keyEvent.key().toString();
+    FCITX_DEBUG() << "V-Input: keyEvent - " << keyEvent.key().toString()
+                  << ", isRelease=" << keyEvent.isRelease()
+                  << ", recording=" << is_recording_;
 
-    // 空格键触发语音输入（Press to Talk）
+    // 空格键触发语音输入（Push to Toggle）
+    // 第一次按下：开始录音
+    // 第二次按下：停止录音并识别
     if (keyEvent.key().check(FcitxKey_space)) {
+        // 只处理按下事件，忽略释放事件
         if (keyEvent.isRelease()) {
-            // 空格键释放：停止录音
-            FCITX_INFO() << "空格键释放 - 停止录音";
-            stopRecording();
-            keyEvent.filterAndAccept();
-            return;
-        } else {
-            // 空格键按下：开始录音
-            FCITX_INFO() << "空格键按下 - 开始录音";
-            startRecording();
+            FCITX_DEBUG() << "忽略空格键释放事件";
             keyEvent.filterAndAccept();
             return;
         }
+
+        // 空格键按下：切换录音状态
+        if (is_recording_) {
+            // 当前正在录音 → 停止录音
+            FCITX_INFO() << "空格键按下 - 停止录音并识别";
+            stopRecording();
+        } else {
+            // 当前未录音 → 开始录音
+            FCITX_INFO() << "空格键按下 - 开始录音";
+            startRecording();
+        }
+
+        keyEvent.filterAndAccept();
+        return;
     }
 }
 

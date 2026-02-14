@@ -124,26 +124,101 @@ impl DateRule {
     ///
     /// # 返回
     /// - 数字日期（例如："2026年3月5日"）
-    ///
-    /// 注意：
-    /// - 不做日期合法性校验
-    /// - 不跨语言块
-    /// - "号" 转换为 "日"
     pub fn convert_chinese(text: &str) -> VInputResult<String> {
-        // 简化实现：仅处理常见格式
-        // 完整实现应该解析年月日并转换
+        use crate::itn::ChineseNumberConverter;
 
-        // 这是一个占位实现，实际应该：
-        // 1. 提取年份部分
-        // 2. 提取月份部分
-        // 3. 提取日期部分
-        // 4. 分别转换为数字
-        // 5. 组合成标准格式
+        let mut result = text.to_string();
 
-        // 由于时间限制，这里返回简化实现
-        // 在主管道中会调用 ChineseNumberConverter 处理具体数字
+        // Step 1: 转换 "号" → "日"
+        result = result.replace("号", "日");
 
-        Ok(text.replace("号", "日"))
+        // Step 2: 使用字符迭代器安全地处理年份、月份、日期
+
+        // 处理年份（如 "二零二六年" → "2026年"）
+        result = Self::convert_date_component(&result, '年', true);
+
+        // 处理月份（如 "二月" → "2月"）
+        result = Self::convert_date_component(&result, '月', false);
+
+        // 处理日期（如 "十四日" → "14日"）
+        result = Self::convert_date_component(&result, '日', false);
+
+        Ok(result)
+    }
+
+    /// 转换日期组件（年/月/日）
+    fn convert_date_component(text: &str, delimiter: char, is_year: bool) -> String {
+        use crate::itn::ChineseNumberConverter;
+
+        // 查找分隔符位置
+        if let Some(delim_pos) = text.find(delimiter) {
+            // 向前收集中文数字字符
+            let chars: Vec<char> = text.chars().collect();
+            let delim_idx = text.char_indices()
+                .position(|(_, c)| c == delimiter)
+                .unwrap();
+
+            // 向前查找连续的中文数字
+            let mut start_idx = delim_idx;
+            while start_idx > 0 {
+                let ch = chars[start_idx - 1];
+                if Self::is_chinese_number_char(ch) {
+                    start_idx -= 1;
+                } else {
+                    break;
+                }
+            }
+
+            if start_idx < delim_idx {
+                // 提取数字部分
+                let number_chars: String = chars[start_idx..delim_idx].iter().collect();
+
+                // 转换数字
+                let converted = if is_year && Self::is_chinese_digit_sequence(&number_chars) {
+                    // 年份逐位转换（如 "二零二六" → "2026"）
+                    Self::convert_year_digits(&number_chars)
+                } else {
+                    // 月份和日期使用 ChineseNumberConverter（如 "十四" → "14"）
+                    ChineseNumberConverter::convert(&number_chars).unwrap_or(number_chars.clone())
+                };
+
+                // 替换
+                let before: String = chars[..start_idx].iter().collect();
+                let after: String = chars[delim_idx..].iter().collect();
+                return format!("{}{}{}", before, converted, after);
+            }
+        }
+
+        text.to_string()
+    }
+
+    /// 检查是否为中文数字字符
+    fn is_chinese_number_char(ch: char) -> bool {
+        matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿')
+    }
+
+    /// 检查是否为中文数字序列（仅基础数字，用于年份判断）
+    fn is_chinese_digit_sequence(text: &str) -> bool {
+        text.chars().all(|c| matches!(c, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'))
+    }
+
+    /// 转换年份数字（逐位转换，用于 "二零二六" 格式）
+    fn convert_year_digits(text: &str) -> String {
+        text.chars()
+            .filter_map(|ch| match ch {
+                '零' => Some('0'),
+                '一' => Some('1'),
+                '二' => Some('2'),
+                '三' => Some('3'),
+                '四' => Some('4'),
+                '五' => Some('5'),
+                '六' => Some('6'),
+                '七' => Some('7'),
+                '八' => Some('8'),
+                '九' => Some('9'),
+                _ => None,
+            })
+            .collect()
     }
 
     /// 检查是否为日期表达

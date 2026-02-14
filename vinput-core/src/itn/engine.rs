@@ -114,21 +114,16 @@ impl ITNEngine {
     fn process_chinese_block(&self, block: &Block) -> Block {
         let mut content = block.content.clone();
 
-        // Step 2: ChineseNumberConverter - 转换中文数字
-        if let Ok(converted) = ChineseNumberConverter::convert(&content) {
-            content = converted;
-        }
+        // Step 2: 先替换所有中文数字序列
+        // 这样即使是混合文本（如 "我有一千块钱"）也能正确转换数字部分
+        content = Self::replace_chinese_numbers(&content);
 
         // Step 4: ColloquialGuard + CurrencyRule - 金额转换
         if self.mode == ITNMode::Auto {
-            let (can_convert, symbol) = ColloquialGuard::can_convert_to_currency(&content);
-            if can_convert {
-                if let Some(sym) = symbol {
-                    // 提取数字部分进行金额转换
-                    // 简化实现：假设整个内容是数字
-                    content = CurrencyRule::format(&content, sym);
-                }
-            }
+            // 注意：现在 content 中的数字已经是阿拉伯数字了（如 "我有1000块钱"）
+            // 所以 CurrencyRule 不应该再在前面加符号，而是应该跳过
+            // 暂时禁用 CurrencyRule，因为它会错误地在整个句子前加 ¥
+            // TODO: 重新设计 CurrencyRule 来处理已转换的数字
 
             // Step 5: PercentageRule - 百分比转换
             if content.starts_with("百分之") {
@@ -150,6 +145,46 @@ impl ITNEngine {
             block_type: block.block_type,
             span: block.span.clone(),
         }
+    }
+
+    /// 替换文本中的所有中文数字序列
+    fn replace_chinese_numbers(text: &str) -> String {
+        let mut result = String::new();
+        let chars: Vec<char> = text.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            // 检查当前字符是否为中文数字字符
+            if Self::is_chinese_number_char(chars[i]) {
+                // 收集连续的中文数字字符
+                let start = i;
+                while i < chars.len() && Self::is_chinese_number_char(chars[i]) {
+                    i += 1;
+                }
+
+                // 提取中文数字序列
+                let number_text: String = chars[start..i].iter().collect();
+
+                // 尝试转换
+                if let Ok(converted) = ChineseNumberConverter::convert(&number_text) {
+                    result.push_str(&converted);
+                } else {
+                    // 转换失败，保留原文
+                    result.push_str(&number_text);
+                }
+            } else {
+                // 非数字字符，直接添加
+                result.push(chars[i]);
+                i += 1;
+            }
+        }
+
+        result
+    }
+
+    /// 检查是否为中文数字字符
+    fn is_chinese_number_char(ch: char) -> bool {
+        matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿'|'点'|'负')
     }
 
     /// 处理英文 Block

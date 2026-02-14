@@ -224,28 +224,47 @@ impl VInputCoreState {
             return;
         }
 
-        tracing::info!("原始识别结果: {}", raw_result);
+        tracing::info!("🎤 原始识别结果: [{}]", raw_result);
 
         // 应用后处理
         // 1. ITN (文本规范化)
+        tracing::info!("📝 开始 ITN 处理...");
         let itn_result = self.itn_engine.process(&raw_result);
         let final_result = itn_result.text;
-        tracing::debug!("ITN 后: {}", final_result);
+
+        if !itn_result.changes.is_empty() {
+            tracing::info!("✏️  ITN 完成: {} 处变更", itn_result.changes.len());
+            for change in &itn_result.changes {
+                tracing::info!("    '{}' → '{}'", change.original_text, change.normalized_text);
+            }
+        } else {
+            tracing::info!("📋 ITN: 无需变更（输入已是规范格式）");
+        }
+
+        tracing::info!("📄 ITN 后: [{}]", final_result);
+
+        // 2. 标点处理（临时方案：简单添加句号）
+        // TODO: 集成完整的 PunctuationEngine（需要流式 token 信息）
+        let mut final_result_with_punct = final_result.clone();
+        if !final_result_with_punct.is_empty() && !final_result_with_punct.ends_with(&['。', '！', '？', '.', '!', '?'][..]) {
+            final_result_with_punct.push('。');
+            tracing::info!("✏️  自动添加句号");
+        }
 
         // 注意：
         // - 标点控制应该在流式识别过程中应用（通过 TokenInfo），而不是在最终文本上
         // - 热词增强应该在创建 ASR 流时设置 hotwords_file，而不是后处理
 
-        tracing::info!("最终结果: {}", final_result);
+        tracing::info!("✅ 最终结果: [{}]", final_result_with_punct);
 
         // 生成命令序列
         // 1. 显示候选词（可以有多个候选）
         self.command_queue
-            .push_back(VInputCommand::show_candidate(&final_result));
+            .push_back(VInputCommand::show_candidate(&final_result_with_punct));
 
         // 2. 提交最终文本
         self.command_queue
-            .push_back(VInputCommand::commit_text(&final_result));
+            .push_back(VInputCommand::commit_text(&final_result_with_punct));
 
         // 3. 隐藏候选词
         self.command_queue
