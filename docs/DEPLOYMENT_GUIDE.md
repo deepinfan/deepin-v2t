@@ -31,6 +31,39 @@ pw-record --list-targets
 
 ### 第一步：安装开发依赖
 
+#### Deepin/UOS 系统
+
+```bash
+# Deepin 系统可能已经预装了 Fcitx5 开发库
+# 检查是否已安装
+dpkg -l | grep fcitx5 | grep dev
+
+# 如果已安装，只需确保构建工具齐全
+sudo apt install -y cmake build-essential pkg-config
+
+# 如果未安装 Fcitx5 开发库
+sudo apt update
+sudo apt install -y libfcitx5core-dev libfcitx5utils-dev \
+    libfcitx5config-dev fcitx5-modules-dev \
+    cmake build-essential pkg-config
+```
+
+**注意**: Deepin 的包名与其他发行版不同：
+- ✅ Deepin: `libfcitx5core-dev`
+- ✅ Ubuntu/Debian: `fcitx5-dev` 或 `libfcitx5core-dev`
+- ✅ pkg-config: Deepin 使用 `Fcitx5Core`（首字母大写）
+
+验证安装：
+```bash
+# Deepin 系统
+pkg-config --modversion Fcitx5Core
+
+# 其他系统
+pkg-config --modversion fcitx5-core
+```
+
+#### Ubuntu/Debian 系统
+
 ```bash
 # 更新软件源
 sudo apt update
@@ -45,7 +78,18 @@ sudo apt install -y cmake build-essential pkg-config
 pkg-config --modversion fcitx5-core
 ```
 
-**预期输出**: 显示 Fcitx5 版本号（例如: 5.1.x）
+#### Fedora/RHEL 系统
+
+```bash
+# 安装开发库
+sudo dnf install -y fcitx5-devel
+
+# 安装构建工具
+sudo dnf install -y cmake gcc-c++ pkg-config
+
+# 验证安装
+pkg-config --modversion fcitx5-core
+```
 
 ### 第二步：编译 Rust 核心库
 

@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$SCRIPT_DIR"  # 脚本就在项目根目录
 
 echo "╔════════════════════════════════════════════════╗"
 echo "║     V-Input Fcitx5 快速部署脚本               ║"
@@ -76,7 +76,11 @@ print_step "检查开发依赖"
 NEED_INSTALL=false
 
 echo "检查 Fcitx5 开发库..."
-if pkg-config --exists fcitx5-core; then
+# Deepin 使用 Fcitx5Core，其他发行版使用 fcitx5-core
+if pkg-config --exists Fcitx5Core; then
+    FCITX5_DEV_VERSION=$(pkg-config --modversion Fcitx5Core)
+    print_success "Fcitx5 开发库已安装 (版本 $FCITX5_DEV_VERSION) [Deepin]"
+elif pkg-config --exists fcitx5-core; then
     FCITX5_DEV_VERSION=$(pkg-config --modversion fcitx5-core)
     print_success "Fcitx5 开发库已安装 (版本 $FCITX5_DEV_VERSION)"
 else
@@ -108,14 +112,35 @@ if [ "$NEED_INSTALL" = true ]; then
     echo
     print_warning "缺少依赖，请运行以下命令安装："
     echo
-    echo "    sudo apt update"
-    echo "    sudo apt install -y fcitx5-dev libfcitx5core-dev cmake build-essential"
+
+    # 检测发行版
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        if [[ "$ID" == "deepin" ]] || [[ "$ID_LIKE" =~ "deepin" ]]; then
+            echo "检测到 Deepin 系统，开发库可能已安装但包名不同"
+            echo "Deepin 已安装的包："
+            echo "    - libfcitx5core-dev"
+            echo "    - libfcitx5utils-dev"
+            echo "    - libfcitx5config-dev"
+            echo
+            echo "如果缺少其他工具，请安装："
+            echo "    sudo apt install -y cmake build-essential pkg-config"
+        else
+            echo "    sudo apt update"
+            echo "    sudo apt install -y fcitx5-dev libfcitx5core-dev cmake build-essential"
+        fi
+    else
+        echo "    sudo apt update"
+        echo "    sudo apt install -y fcitx5-dev libfcitx5core-dev cmake build-essential"
+    fi
+
     echo
     read -p "是否现在安装？(需要 sudo 权限) [y/N] " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         sudo apt update
-        sudo apt install -y fcitx5-dev libfcitx5core-dev cmake build-essential pkg-config
+        # Deepin 已经有 libfcitx5core-dev，只需要确保构建工具齐全
+        sudo apt install -y cmake build-essential pkg-config
         print_success "依赖安装完成"
     else
         print_error "缺少依赖，退出"

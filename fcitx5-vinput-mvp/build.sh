@@ -10,18 +10,25 @@ echo "=== V-Input Fcitx5 插件构建 ==="
 echo
 
 # 检查 Fcitx5 开发库
-if ! pkg-config --exists fcitx5-core; then
+# Deepin 使用 Fcitx5Core (首字母大写)，其他发行版使用 fcitx5-core
+if pkg-config --exists Fcitx5Core; then
+    FCITX5_VERSION=$(pkg-config --modversion Fcitx5Core)
+    echo "✓ 找到 Fcitx5 Core: $FCITX5_VERSION (Deepin)"
+elif pkg-config --exists fcitx5-core; then
+    FCITX5_VERSION=$(pkg-config --modversion fcitx5-core)
+    echo "✓ 找到 Fcitx5 Core: $FCITX5_VERSION"
+else
     echo "❌ 错误: 未找到 Fcitx5 开发库"
     echo
     echo "请先安装 Fcitx5 开发包:"
-    echo "  sudo apt install fcitx5-dev libfcitx5core-dev"
-    echo "  或"
-    echo "  sudo dnf install fcitx5-devel"
+    echo "  Deepin/UOS:"
+    echo "    sudo apt install libfcitx5core-dev libfcitx5utils-dev"
+    echo "  Ubuntu/Debian:"
+    echo "    sudo apt install fcitx5-dev libfcitx5core-dev"
+    echo "  Fedora/RHEL:"
+    echo "    sudo dnf install fcitx5-devel"
     exit 1
 fi
-
-FCITX5_VERSION=$(pkg-config --modversion fcitx5-core)
-echo "✓ 找到 Fcitx5 Core: $FCITX5_VERSION"
 echo
 
 # 检查 vinput-core 库
