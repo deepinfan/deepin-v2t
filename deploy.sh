@@ -203,12 +203,12 @@ else
     exit 1
 fi
 
-PLUGIN_PATH="$PROJECT_ROOT/fcitx5-vinput-mvp/build/libvinput.so"
+PLUGIN_PATH="$PROJECT_ROOT/fcitx5-vinput-mvp/build/vinput.so"
 if [ -f "$PLUGIN_PATH" ]; then
     PLUGIN_SIZE=$(du -h "$PLUGIN_PATH" | cut -f1)
-    print_success "生成 libvinput.so ($PLUGIN_SIZE)"
+    print_success "生成 vinput.so ($PLUGIN_SIZE)"
 else
-    print_error "未找到 libvinput.so"
+    print_error "未找到 vinput.so"
     exit 1
 fi
 
@@ -218,7 +218,7 @@ print_step "安装插件"
 echo "准备安装到系统目录（需要 sudo 权限）..."
 echo
 echo "将安装以下文件："
-echo "  - /usr/lib/*/fcitx5/libvinput.so"
+echo "  - /usr/lib/*/fcitx5/vinput.so"
 echo "  - /usr/share/fcitx5/addon/vinput.conf"
 echo "  - /usr/share/fcitx5/inputmethod/vinput-im.conf"
 echo
@@ -244,8 +244,8 @@ echo
 echo "验证安装..."
 INSTALLED_COUNT=0
 
-if ls /usr/lib/*/fcitx5/libvinput.so &>/dev/null; then
-    print_success "libvinput.so 已安装"
+if ls /usr/lib/*/fcitx5/vinput.so &>/dev/null; then
+    print_success "vinput.so 已安装"
     INSTALLED_COUNT=$((INSTALLED_COUNT + 1))
 fi
 

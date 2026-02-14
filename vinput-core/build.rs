@@ -45,14 +45,16 @@ fn main() {
     }
 
     // 生成 cbindgen C 头文件 (for fcitx5-vinput)
-    // 临时禁用以解决条件编译导致的 cbindgen 解析问题
-    // TODO: 修复 cbindgen 配置或代码结构
-    /*
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let output_file = PathBuf::from(&crate_dir)
         .parent()
         .unwrap()
         .join("target/vinput_core.h");
+
+    // 确保 target 目录存在
+    if let Some(parent) = output_file.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
 
     if let Ok(config) = cbindgen::Config::from_file("cbindgen.toml") {
         cbindgen::Builder::new()
@@ -60,7 +62,8 @@ fn main() {
             .with_config(config)
             .generate()
             .expect("Failed to generate C bindings")
-            .write_to_file(output_file);
+            .write_to_file(&output_file);
+
+        println!("cargo:warning=Generated C header: {}", output_file.display());
     }
-    */
 }
