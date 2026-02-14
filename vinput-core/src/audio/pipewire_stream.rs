@@ -188,123 +188,96 @@ fn run_simulated_pipewire_loop(
     Ok(())
 }
 
-/// 真实 PipeWire 主循环（需要 PipeWire 环境）
+/// 真实 PipeWire 主循环（使用 pw-record 子进程）
 #[cfg(feature = "pipewire-capture")]
 fn run_real_pipewire_loop(
     config: PipeWireStreamConfig,
-    producer: AudioRingProducer,
+    mut producer: AudioRingProducer,
     running: Arc<AtomicBool>,
     quit_signal: Arc<AtomicBool>,
 ) -> VInputResult<()> {
-    use pipewire::{
-        properties,
-        spa::{
-            param::audio::{AudioFormat as SpaAudioFormat, AudioInfoRaw},
-            utils::Direction,
-        },
-        stream::{Stream, StreamFlags},
-        Context, MainLoop,
-    };
-    use std::sync::Mutex;
+    use std::process::{Command, Stdio};
+    use std::io::Read;
 
-    tracing::info!("PipeWire 真实音频捕获模式");
+    tracing::info!("PipeWire 真实音频捕获模式 (pw-record)");
 
-    // 初始化 PipeWire
-    pipewire::init();
-
-    // 创建主循环
-    let mainloop = MainLoop::new(None)
-        .map_err(|e| VInputError::PipeWire(format!("创建主循环失败: {}", e)))?;
-    let context = Context::new(&mainloop)
-        .map_err(|e| VInputError::PipeWire(format!("创建上下文失败: {}", e)))?;
-    let core = context.connect(None)
-        .map_err(|e| VInputError::PipeWire(format!("连接 PipeWire 失败: {}", e)))?;
-
-    // 创建音频流
-    let stream_props = properties! {
-        "media.type" => "Audio",
-        "media.category" => "Capture",
-        "media.role" => "Communication",
-        "app.name" => config.app_name.as_str(),
-    };
-
-    let stream = Stream::new(&core, config.stream_name.as_str(), stream_props)
-        .map_err(|e| VInputError::PipeWire(format!("创建流失败: {}", e)))?;
-
-    // 设置音频参数
-    let audio_info = AudioInfoRaw::new()
-        .format(match config.format {
-            AudioFormat::F32LE => SpaAudioFormat::F32LE,
-            AudioFormat::S16LE => SpaAudioFormat::S16LE,
+    // 启动 pw-record 子进程
+    let mut child = Command::new("pw-record")
+        .arg("--rate").arg(config.sample_rate.to_string())
+        .arg("--channels").arg(config.channels.to_string())
+        .arg("--format").arg(match config.format {
+            AudioFormat::F32LE => "f32",
+            AudioFormat::S16LE => "s16",
         })
-        .rate(config.sample_rate)
-        .channels(config.channels);
+        .arg("-")  // 输出到 stdout
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| VInputError::PipeWire(format!("启动 pw-record 失败: {}", e)))?;
 
-    // 使用 Arc<Mutex> 包装 producer 以便在回调中使用
-    let producer_shared = Arc::new(Mutex::new(producer));
-    let producer_for_callback = producer_shared.clone();
+    tracing::info!("pw-record 子进程已启动 (PID: {})", child.id());
+    running.store(true, Ordering::Release);
 
-    // 注册流事件监听器
-    let _listener = stream
-        .add_local_listener()
-        .process({
-            let producer = producer_for_callback;
-            move |stream| {
-                // 获取音频缓冲区
-                if let Some(mut buffer) = stream.dequeue_buffer() {
-                    let datas = buffer.datas_mut();
-                    if !datas.is_empty() {
-                        // 获取第一个数据块
-                        let data = &datas[0];
-                        if let Some(chunk) = data.chunk() {
-                            let size = chunk.size();
+    // 从 stdout 读取音频数据
+    let mut stdout = child.stdout.take()
+        .ok_or_else(|| VInputError::PipeWire("无法获取 pw-record stdout".to_string()))?;
 
-                            if size > 0 {
-                                // 读取音频数据
-                                if let Some(slice) = data.data() {
-                                    let samples = unsafe {
-                                        std::slice::from_raw_parts(
-                                            slice.as_ptr() as *const f32,
-                                            size as usize / std::mem::size_of::<f32>(),
-                                        )
-                                    };
+    let frame_size = 1024; // 每次读取 1024 个样本
+    let buffer_size = frame_size * std::mem::size_of::<f32>();
+    let mut buffer = vec![0u8; buffer_size];
+    let mut total_samples = 0usize;
 
-                                    // 写入 Ring Buffer
-                                    if let Ok(mut prod) = producer.lock() {
-                                        if let Err(e) = prod.write(samples) {
-                                            tracing::warn!("Ring Buffer 写入失败: {:?}", e);
-                                        }
-                                    }
-                                }
-                            }
+    while !quit_signal.load(Ordering::Acquire) {
+        // 读取音频数据
+        match stdout.read(&mut buffer) {
+            Ok(0) => {
+                // EOF - pw-record 进程结束
+                tracing::warn!("pw-record 进程意外结束");
+                break;
+            }
+            Ok(bytes_read) => {
+                // 转换为 f32 样本
+                let sample_count = bytes_read / std::mem::size_of::<f32>();
+                let samples: &[f32] = unsafe {
+                    std::slice::from_raw_parts(
+                        buffer.as_ptr() as *const f32,
+                        sample_count,
+                    )
+                };
+
+                // 写入 Ring Buffer
+                match producer.write(samples) {
+                    Ok(written) => {
+                        total_samples += written;
+                        if total_samples % (config.sample_rate as usize) == 0 {
+                            tracing::trace!("已捕获 {} 秒真实音频",
+                                total_samples / config.sample_rate as usize);
                         }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Ring Buffer 写入失败: {:?}", e);
                     }
                 }
             }
-        })
-        .register()
-        .map_err(|e| VInputError::PipeWire(format!("注册监听器失败: {}", e)))?;
-
-    // 连接流
-    let mut params = vec![audio_info.into()];
-    stream.connect(
-        Direction::Input,
-        None, // 使用默认音频源
-        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS | StreamFlags::RT_PROCESS,
-        &mut params,
-    )
-    .map_err(|e| VInputError::PipeWire(format!("连接流失败: {}", e)))?;
-
-    tracing::info!("PipeWire 流已连接，开始捕获真实音频");
-    running.store(true, Ordering::Release);
-
-    // 运行主循环
-    while !quit_signal.load(Ordering::Acquire) {
-        mainloop.iterate(Duration::from_millis(10));
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // 非阻塞模式下无数据，等待一小会儿
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => {
+                tracing::error!("读取 pw-record 输出失败: {}", e);
+                break;
+            }
+        }
     }
 
+    // 停止 pw-record
+    tracing::info!("停止 pw-record 进程");
+    let _ = child.kill();
+    let _ = child.wait();
+
     running.store(false, Ordering::Release);
-    tracing::info!("PipeWire 流线程停止");
+    tracing::info!("PipeWire 流线程停止，共捕获 {:.2} 秒真实音频",
+        total_samples as f32 / config.sample_rate as f32);
 
     Ok(())
 }
