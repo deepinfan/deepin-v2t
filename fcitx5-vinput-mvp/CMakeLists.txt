@@ -4,6 +4,9 @@ project(fcitx5-vinput VERSION 0.1.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 包含标准安装目录定义
+include(GNUInstallDirs)
+
 # 查找 Fcitx5
 find_package(Fcitx5Core REQUIRED)
 # Fcitx5Module 不是必需的，移除以避免组件要求错误
