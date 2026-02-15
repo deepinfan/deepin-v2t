@@ -3,34 +3,48 @@
 //! 基于 VAD 和 ASR 端点的智能语音边界检测
 //! Phase 1.5: 端点检测优化
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// 端点检测配置
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointDetectorConfig {
     /// 最小语音长度（毫秒）
     /// 低于此长度的音频段会被忽略（过滤点击音等）
+    #[serde(default = "default_min_speech_ms")]
     pub min_speech_duration_ms: u64,
 
     /// 最大语音长度（毫秒）
     /// 超过此长度会自动分段
+    #[serde(default = "default_max_speech_ms")]
     pub max_speech_duration_ms: u64,
 
     /// 语音结束后的静音等待时间（毫秒）
     /// 用于确认用户说话已结束
+    #[serde(default = "default_trailing_silence_ms")]
     pub trailing_silence_ms: u64,
 
     /// 强制超时（毫秒）
     /// 即使没有检测到端点，超时后也会强制结束
+    #[serde(default = "default_force_timeout_ms")]
     pub force_timeout_ms: u64,
 
     /// 是否启用 VAD 辅助端点检测
+    #[serde(default = "default_true")]
     pub vad_assisted: bool,
 
     /// VAD 检测到静音后的确认帧数
     /// 连续 N 帧静音才确认语音结束
+    #[serde(default = "default_vad_silence_frames")]
     pub vad_silence_confirm_frames: usize,
 }
+
+fn default_min_speech_ms() -> u64 { 300 }
+fn default_max_speech_ms() -> u64 { 30_000 }
+fn default_trailing_silence_ms() -> u64 { 800 }
+fn default_force_timeout_ms() -> u64 { 60_000 }
+fn default_true() -> bool { true }
+fn default_vad_silence_frames() -> usize { 5 }
 
 impl Default for EndpointDetectorConfig {
     fn default() -> Self {
@@ -86,11 +100,21 @@ pub struct EndpointDetector {
     // VAD 状态跟踪
     consecutive_silence_frames: usize,
     consecutive_speech_frames: usize,
+
+    // 音频缓冲区（用于能量检测）
+    // 存储最近 400ms 的音频样本（16kHz × 0.4s = 6400 samples）
+    audio_buffer: Vec<f32>,
+    buffer_capacity: usize,
 }
 
 impl EndpointDetector {
     /// 创建新的端点检测器
     pub fn new(config: EndpointDetectorConfig) -> Self {
+        // 音频缓冲区容量: 16kHz × 0.4s = 6400 samples
+        const SAMPLE_RATE: usize = 16000;
+        const BUFFER_DURATION_MS: usize = 400;
+        let buffer_capacity = SAMPLE_RATE * BUFFER_DURATION_MS / 1000;
+
         Self {
             config,
             state: DetectorState::WaitingForSpeech,
@@ -99,6 +123,8 @@ impl EndpointDetector {
             session_start_time: Instant::now(),
             consecutive_silence_frames: 0,
             consecutive_speech_frames: 0,
+            audio_buffer: Vec::with_capacity(buffer_capacity),
+            buffer_capacity,
         }
     }
 
@@ -115,6 +141,7 @@ impl EndpointDetector {
         self.session_start_time = Instant::now();
         self.consecutive_silence_frames = 0;
         self.consecutive_speech_frames = 0;
+        self.audio_buffer.clear();
     }
 
     /// 处理 VAD 检测结果
@@ -256,6 +283,87 @@ impl EndpointDetector {
     pub fn is_speech_detected(&self) -> bool {
         self.state == DetectorState::SpeechDetected ||
         self.state == DetectorState::TrailingSilence
+    }
+
+    /// 接收音频样本到缓冲区
+    ///
+    /// # 参数
+    /// - `samples`: 音频样本数组
+    pub fn feed_audio(&mut self, samples: &[f32]) {
+        // 如果缓冲区满了，移除前面的样本为新样本腾出空间
+        let samples_to_add = samples.len();
+        if self.audio_buffer.len() + samples_to_add > self.buffer_capacity {
+            let excess = self.audio_buffer.len() + samples_to_add - self.buffer_capacity;
+            self.audio_buffer.drain(0..excess);
+        }
+
+        // 添加新样本
+        self.audio_buffer.extend_from_slice(samples);
+    }
+
+    /// 分析能量趋势，判断语音结尾是否上升（疑问语气）
+    ///
+    /// 比较最后 100ms 和前 300ms 的 RMS 能量
+    ///
+    /// # 返回值
+    /// - `true`: 能量上升（可能是疑问语气）
+    /// - `false`: 能量下降或平稳
+    pub fn analyze_energy_trend(&self) -> bool {
+        // 需要至少 400ms 的音频数据 (16kHz × 0.4s = 6400 samples)
+        const SAMPLE_RATE: usize = 16000;
+        const TAIL_DURATION_MS: usize = 100;
+        const BASELINE_DURATION_MS: usize = 300;
+
+        let tail_samples = SAMPLE_RATE * TAIL_DURATION_MS / 1000; // 1600 samples
+        let baseline_samples = SAMPLE_RATE * BASELINE_DURATION_MS / 1000; // 4800 samples
+        let required_samples = tail_samples + baseline_samples; // 6400 samples
+
+        if self.audio_buffer.len() < required_samples {
+            tracing::debug!("能量检测: 音频数据不足 ({} < {} samples)",
+                self.audio_buffer.len(), required_samples);
+            return false;
+        }
+
+        // 获取最后 100ms 的样本
+        let tail_start = self.audio_buffer.len() - tail_samples;
+        let tail_slice = &self.audio_buffer[tail_start..];
+
+        // 获取前 300ms 的样本（紧接着最后 100ms 之前）
+        let baseline_start = tail_start - baseline_samples;
+        let baseline_slice = &self.audio_buffer[baseline_start..tail_start];
+
+        // 计算两段的 RMS 能量
+        let tail_rms = Self::calculate_rms(tail_slice);
+        let baseline_rms = Self::calculate_rms(baseline_slice);
+
+        tracing::debug!("能量检测: baseline_rms={:.6}, tail_rms={:.6}, ratio={:.2}",
+            baseline_rms, tail_rms,
+            if baseline_rms > 0.0 { tail_rms / baseline_rms } else { 0.0 });
+
+        // 判断能量是否上升
+        // 如果尾部能量 > baseline 能量的 1.2 倍，认为是上升趋势
+        const RISING_THRESHOLD: f32 = 1.2;
+
+        if baseline_rms > 1e-6 { // 避免除以零
+            let ratio = tail_rms / baseline_rms;
+            if ratio > RISING_THRESHOLD {
+                tracing::info!("✨ 能量上升检测: ratio={:.2} > {}, 可能是疑问语气",
+                    ratio, RISING_THRESHOLD);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// 计算音频样本的 RMS 能量
+    fn calculate_rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+
+        let sum_squares: f32 = samples.iter().map(|&s| s * s).sum();
+        (sum_squares / samples.len() as f32).sqrt()
     }
 }
 

@@ -16,6 +16,9 @@ pub struct VInputConfig {
     pub vad: VadConfig,
     /// ASR 配置
     pub asr: AsrConfig,
+    /// 端点检测配置
+    #[serde(default)]
+    pub endpoint: EndpointConfig,
 }
 
 /// 热词配置
@@ -72,6 +75,36 @@ pub struct AsrConfig {
     pub hotwords_score: f32,
 }
 
+/// 端点检测配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointConfig {
+    /// 最小语音长度（毫秒）
+    pub min_speech_duration_ms: u64,
+    /// 最大语音长度（毫秒）
+    pub max_speech_duration_ms: u64,
+    /// 语音结束后的静音等待时间（毫秒）
+    pub trailing_silence_ms: u64,
+    /// 强制超时（毫秒）
+    pub force_timeout_ms: u64,
+    /// 是否启用 VAD 辅助端点检测
+    pub vad_assisted: bool,
+    /// VAD 检测到静音后的确认帧数
+    pub vad_silence_confirm_frames: usize,
+}
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self {
+            min_speech_duration_ms: 300,
+            max_speech_duration_ms: 30000,
+            trailing_silence_ms: 800,
+            force_timeout_ms: 60000,
+            vad_assisted: true,
+            vad_silence_confirm_frames: 5,
+        }
+    }
+}
+
 impl Default for VInputConfig {
     fn default() -> Self {
         Self {
@@ -100,6 +133,7 @@ impl Default for VInputConfig {
                 hotwords_file: None,
                 hotwords_score: 1.5,
             },
+            endpoint: EndpointConfig::default(),
         }
     }
 }

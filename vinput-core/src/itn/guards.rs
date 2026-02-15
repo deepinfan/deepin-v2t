@@ -124,6 +124,72 @@ impl ContextGuard {
     }
 }
 
+/// ChineseWordGuard - 中文常用词守卫
+///
+/// 防止常用词（如 "一起"、"一些"）中的数字被误转换
+pub struct ChineseWordGuard;
+
+impl ChineseWordGuard {
+    /// 不应转换的常用词白名单
+    const PROTECTED_WORDS: &'static [&'static str] = &[
+        // "一" 字开头的常用词
+        "一起", "一些", "一般", "一下", "一样", "一直", "一定",
+        "一边", "一共", "一旦", "一致", "一刻", "一切", "一向",
+        "一律", "一再", "一度", "一时", "一概", "一并", "一贯",
+        "一如", "一经", "一味", "一身", "一番", "一帆", "一路",
+        // 指示词
+        "这些", "那些", "哪些", "某些",
+        // 其他常用词
+        "万一", "统一", "唯一", "单一", "第一",
+    ];
+
+    /// 非数字后缀（数字字符后跟这些字符应跳过转换）
+    /// 这些后缀表示词汇而非数字单位
+    const NON_NUMERIC_SUFFIXES: &'static [char] = &[
+        '起', '些', '般', '下', '样', '直', '定', '边', '共',
+        '旦', '致', '刻', '切', '向', '律', '再', '度', '时',
+        '概', '并', '贯', '如', '经', '味', '身', '番', '帆', '路',
+    ];
+
+    /// 检查是否应该跳过数字转换
+    ///
+    /// 返回 true 表示应该保留原文，不进行数字转换
+    pub fn should_skip_conversion(text: &str) -> bool {
+        // 策略 1: 检查完整词白名单
+        if Self::PROTECTED_WORDS.contains(&text) {
+            return true;
+        }
+
+        // 策略 2: 检查是否为 "数字字符 + 非数字后缀" 模式
+        if Self::is_non_numeric_pattern(text) {
+            return true;
+        }
+
+        false
+    }
+
+    /// 检查是否为非数字模式（如 "一起"、"二般"）
+    ///
+    /// 规则：两个字符，第一个是数字字符，第二个是非数字后缀
+    fn is_non_numeric_pattern(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() != 2 {
+            return false;
+        }
+
+        // 第一个字符是中文数字字符
+        let is_first_digit = matches!(
+            chars[0],
+            '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九'
+        );
+
+        // 第二个字符是非数字后缀
+        let is_second_suffix = Self::NON_NUMERIC_SUFFIXES.contains(&chars[1]);
+
+        is_first_digit && is_second_suffix
+    }
+}
+
 /// ColloquialGuard - 口语守卫
 ///
 /// 防止口语数量表达误转为金额
@@ -198,6 +264,42 @@ impl ColloquialGuard {
 mod tests {
     use super::*;
     use crate::itn::{BlockType, Tokenizer};
+
+    #[test]
+    fn test_chinese_word_guard_protected_words() {
+        // 常用词应该被保护
+        assert!(ChineseWordGuard::should_skip_conversion("一起"));
+        assert!(ChineseWordGuard::should_skip_conversion("一些"));
+        assert!(ChineseWordGuard::should_skip_conversion("一般"));
+        assert!(ChineseWordGuard::should_skip_conversion("一下"));
+        assert!(ChineseWordGuard::should_skip_conversion("一样"));
+        assert!(ChineseWordGuard::should_skip_conversion("这些"));
+        assert!(ChineseWordGuard::should_skip_conversion("那些"));
+
+        // 数字表达不应该被保护
+        assert!(!ChineseWordGuard::should_skip_conversion("一千"));
+        assert!(!ChineseWordGuard::should_skip_conversion("二十"));
+        assert!(!ChineseWordGuard::should_skip_conversion("三百"));
+        assert!(!ChineseWordGuard::should_skip_conversion("一"));
+        assert!(!ChineseWordGuard::should_skip_conversion("十"));
+    }
+
+    #[test]
+    fn test_chinese_word_guard_non_numeric_pattern() {
+        // 数字 + 非数字后缀应该被保护
+        assert!(ChineseWordGuard::is_non_numeric_pattern("一起"));
+        assert!(ChineseWordGuard::is_non_numeric_pattern("二般"));
+        assert!(ChineseWordGuard::is_non_numeric_pattern("三下"));
+
+        // 数字 + 数字单位不应该被保护
+        assert!(!ChineseWordGuard::is_non_numeric_pattern("一十"));
+        assert!(!ChineseWordGuard::is_non_numeric_pattern("二百"));
+        assert!(!ChineseWordGuard::is_non_numeric_pattern("三千"));
+
+        // 单个字符或多于两个字符不匹配模式
+        assert!(!ChineseWordGuard::is_non_numeric_pattern("一"));
+        assert!(!ChineseWordGuard::is_non_numeric_pattern("一二三"));
+    }
 
     #[test]
     fn test_context_guard_url() {

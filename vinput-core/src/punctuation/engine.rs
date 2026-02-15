@@ -3,7 +3,7 @@
 //! 整合 PauseEngine 和 RuleLayer，提供完整的标点处理
 
 use crate::punctuation::config::StyleProfile;
-use crate::punctuation::pause_engine::{PauseEngine, TokenInfo};
+use crate::punctuation::pause_engine::{PauseEngine, TokenAction, TokenInfo};
 use crate::punctuation::rules::RuleLayer;
 
 /// 标点处理结果
@@ -52,7 +52,8 @@ impl PunctuationEngine {
     ///
     /// # 返回
     /// - `Some(token_with_comma)`: 如果需要在 token 前插入逗号
-    /// - `None`: 不插入逗号，返回原 token
+    /// - `Some(token)`: 正常添加 token
+    /// - `None`: 跳过此 token（时长过短）
     pub fn process_token(&mut self, token: TokenInfo) -> Option<String> {
         let word = token.text.clone();
 
@@ -62,13 +63,19 @@ impl PunctuationEngine {
             self.current_sentence.len(),
         );
 
-        // 2. 检查停顿规则
-        let should_insert_comma_pause = self.pause_engine.add_token(token);
+        // 2. 检查停顿规则（同时检查是否应该跳过 token）
+        let token_action = self.pause_engine.add_token(token);
 
-        // 3. 决定是否插入逗号
-        let insert_comma = should_insert_comma_rule || should_insert_comma_pause;
+        // 3. 如果 token 应该被跳过（时长过短），直接返回 None
+        if token_action == TokenAction::Skip {
+            tracing::debug!("  ⏭  Token '{}' 被跳过（时长过短）", word);
+            return None;
+        }
 
-        // 4. 构造返回值
+        // 4. 决定是否插入逗号
+        let insert_comma = should_insert_comma_rule || token_action == TokenAction::InsertComma;
+
+        // 5. 构造返回值
         self.current_sentence.push(word.clone());
 
         if insert_comma {
@@ -139,9 +146,9 @@ mod tests {
 
     #[test]
     fn test_punctuation_engine_basic() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
-        let token = TokenInfo::new("你好".to_string(), 0, 200);
+        let token = TokenInfo::new("你好".to_string(), 0, 0 + 600);
         let result = engine.process_token(token);
 
         assert_eq!(result, Some("你好".to_string()));
@@ -149,20 +156,29 @@ mod tests {
 
     #[test]
     fn test_punctuation_engine_with_pause() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
-        // 添加 6 个正常 token
-        for i in 0..6 {
+        // 添加 5 个正常 token（时长 600ms）
+        for i in 0..5 {
             let token = TokenInfo::new(
                 format!("词{}", i),
-                i * 200,
-                i * 200 + 180,
+                i * 700,
+                i * 700 + 600,
             );
             engine.process_token(token);
         }
 
-        // 添加一个带长停顿的 token
-        let paused_token = TokenInfo::new("下一个".to_string(), 2000, 2180);
+        // 添加第 6 个 token，时长异常长（包含停顿）
+        let long_token = TokenInfo::new(
+            "词5".to_string(),
+            3500,
+            5800,  // 时长 2300ms，包含停顿
+        );
+        engine.process_token(long_token);
+
+        // 添加下一个 token
+        // 因为上一个 token 时长异常长，应该在前面插入逗号
+        let paused_token = TokenInfo::new("下一个".to_string(), 5800, 6400);
         let result = engine.process_token(paused_token);
 
         // 应该在 "下一个" 前插入逗号
@@ -171,20 +187,20 @@ mod tests {
 
     #[test]
     fn test_punctuation_engine_logic_word() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加 8 个 token（达到 logic_word_min_tokens）
         for i in 0..8 {
             let token = TokenInfo::new(
                 format!("词{}", i),
-                i * 200,
-                i * 200 + 180,
+                i * 700,
+                i * 700 + 600,
             );
             engine.process_token(token);
         }
 
         // 添加逻辑连接词
-        let logic_token = TokenInfo::new("所以".to_string(), 1600, 1780);
+        let logic_token = TokenInfo::new("所以".to_string(), 5600, 5600 + 600);
         let result = engine.process_token(logic_token);
 
         // 应该在 "所以" 前插入逗号
@@ -193,11 +209,11 @@ mod tests {
 
     #[test]
     fn test_finalize_sentence_with_question() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加 "你好吗"
-        engine.process_token(TokenInfo::new("你好".to_string(), 0, 200));
-        engine.process_token(TokenInfo::new("吗".to_string(), 200, 350));
+        engine.process_token(TokenInfo::new("你好".to_string(), 0, 0 + 600));
+        engine.process_token(TokenInfo::new("吗".to_string(), 200, 200 + 600));
 
         // 结束时能量上扬，应该插入问号
         let ending = engine.finalize_sentence(1000, true);
@@ -206,11 +222,11 @@ mod tests {
 
     #[test]
     fn test_finalize_sentence_with_period() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加普通句子
-        engine.process_token(TokenInfo::new("测试".to_string(), 0, 200));
-        engine.process_token(TokenInfo::new("句子".to_string(), 200, 400));
+        engine.process_token(TokenInfo::new("测试".to_string(), 0, 0 + 600));
+        engine.process_token(TokenInfo::new("句子".to_string(), 200, 200 + 600));
 
         // VAD 静音超过 800ms，应该插入句号
         let ending = engine.finalize_sentence(900, false);
@@ -219,9 +235,9 @@ mod tests {
 
     #[test]
     fn test_finalize_sentence_no_punctuation() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
-        engine.process_token(TokenInfo::new("测试".to_string(), 0, 200));
+        engine.process_token(TokenInfo::new("测试".to_string(), 0, 0 + 600));
 
         // VAD 静音不足，不插入句号
         let ending = engine.finalize_sentence(500, false);
@@ -230,9 +246,9 @@ mod tests {
 
     #[test]
     fn test_reset_sentence() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
-        engine.process_token(TokenInfo::new("测试".to_string(), 0, 200));
+        engine.process_token(TokenInfo::new("测试".to_string(), 0, 0 + 600));
         assert_eq!(engine.current_sentence(), "测试");
 
         engine.reset_sentence();
@@ -241,15 +257,15 @@ mod tests {
 
     #[test]
     fn test_update_profile() {
-        let mut engine = PunctuationEngine::new(StyleProfile::professional());
+        let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
-        engine.update_profile(StyleProfile::balanced());
+        engine.update_profile(StyleProfile::from_preset("Balanced"));
         assert_eq!(engine.profile().streaming_pause_ratio, 2.8);
     }
 
     #[test]
     fn test_default_engine() {
         let engine = PunctuationEngine::default();
-        assert_eq!(engine.profile().streaming_pause_ratio, 3.5);
+        assert_eq!(engine.profile().streaming_pause_ratio, 2.5);
     }
 }

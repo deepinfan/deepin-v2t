@@ -125,8 +125,6 @@ impl DateRule {
     /// # 返回
     /// - 数字日期（例如："2026年3月5日"）
     pub fn convert_chinese(text: &str) -> VInputResult<String> {
-        use crate::itn::ChineseNumberConverter;
-
         let mut result = text.to_string();
 
         // Step 1: 转换 "号" → "日"

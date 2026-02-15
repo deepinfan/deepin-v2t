@@ -38,6 +38,10 @@ pub enum VInputEventType {
     RecognitionResult = 4,
     /// VAD 状态变化
     VADStateChanged = 5,
+    /// 撤销请求
+    UndoRequest = 6,
+    /// 重试请求
+    RedoRequest = 7,
 }
 
 /// V-Input 事件（从 Fcitx5 -> Rust Core）
@@ -63,6 +67,10 @@ pub enum VInputCommandType {
     HideCandidate = 3,
     /// 错误消息
     Error = 4,
+    /// 撤销文本
+    UndoText = 5,
+    /// 重试文本
+    RedoText = 6,
 }
 
 /// V-Input 命令（从 Rust Core -> Fcitx5）
@@ -80,6 +88,12 @@ pub struct VInputCommand {
 // 由于 text 指针是从 CString::into_raw() 获得的，我们确保其生命周期正确
 unsafe impl Send for VInputCommand {}
 unsafe impl Sync for VInputCommand {}
+
+/// 命令回调函数类型
+///
+/// 当 Rust Core 生成命令时，直接调用此回调通知 C++ 插件
+/// 参数: VInputCommand 指针（C++ 需要调用 vinput_command_free 释放）
+pub type VInputCommandCallback = extern "C" fn(*const VInputCommand);
 
 /// 不透明的 V-Input Core 句柄
 #[repr(C)]
@@ -160,6 +174,28 @@ impl VInputCommand {
             command_type: VInputCommandType::Error,
             text: c_text.into_raw(),
             text_len: message.len(),
+        }
+    }
+
+    /// 创建撤销文本命令
+    pub fn undo_text(text: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(text).unwrap();
+        Self {
+            command_type: VInputCommandType::UndoText,
+            text: c_text.into_raw(),
+            text_len: text.len(),
+        }
+    }
+
+    /// 创建重试文本命令
+    pub fn redo_text(text: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(text).unwrap();
+        Self {
+            command_type: VInputCommandType::RedoText,
+            text: c_text.into_raw(),
+            text_len: text.len(),
         }
     }
 }

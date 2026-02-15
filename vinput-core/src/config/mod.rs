@@ -3,6 +3,7 @@
 //! 统一的配置管理，从 ~/.config/vinput/config.toml 加载
 
 use crate::asr::OnlineRecognizerConfig;
+use crate::endpointing::EndpointDetectorConfig;
 use crate::hotwords::HotwordsConfig;
 use crate::punctuation::PunctuationConfig;
 use crate::vad::VadConfig;
@@ -20,6 +21,9 @@ pub struct VInputConfig {
     pub punctuation: PunctuationConfig,
     /// 热词配置
     pub hotwords: HotwordsConfig,
+    /// 端点检测配置（自动断句上屏）
+    #[serde(default)]
+    pub endpoint: EndpointDetectorConfig,
 }
 
 impl Default for VInputConfig {
@@ -36,6 +40,7 @@ impl Default for VInputConfig {
             asr: asr_config,
             punctuation: PunctuationConfig::default(),
             hotwords: HotwordsConfig::default(),
+            endpoint: EndpointDetectorConfig::default(),
         }
     }
 }
@@ -58,6 +63,11 @@ impl VInputConfig {
             config.punctuation.streaming_pause_ratio,
             config.punctuation.streaming_min_tokens,
             config.punctuation.allow_exclamation
+        );
+        tracing::info!("🎯 端点检测: trailing_silence={}ms, min_speech={}ms, vad_frames={}",
+            config.endpoint.trailing_silence_ms,
+            config.endpoint.min_speech_duration_ms,
+            config.endpoint.vad_silence_confirm_frames
         );
         Ok(config)
     }

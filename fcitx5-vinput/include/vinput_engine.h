@@ -22,7 +22,7 @@ namespace fcitx {
 /**
  * V-Input 输入法引擎
  *
- * 完整实现：VAD + ASR + ITN + 候选词
+ * 完整实现：VAD + ASR + ITN + 候选词 + 自动上屏
  */
 class VInputEngine : public InputMethodEngine {
 public:
@@ -41,6 +41,9 @@ public:
     const Configuration* getConfig() const override { return nullptr; }
     void setConfig(const RawConfig&) override {}
 
+    // 命令回调处理（静态方法，供 FFI 回调）
+    static void handleCommand(const VInputVInputCommand* command);
+
 private:
     Instance* instance_;
     bool vinput_core_initialized_;
@@ -49,6 +52,8 @@ private:
     void startRecording();
     void stopRecording();
     void processCommands(InputContext* ic);
+    void requestUndo();
+    void requestRedo();
 };
 
 /**

@@ -4,12 +4,13 @@
 //! 完整集成: StreamingPipeline + ITN + Punctuation + Hotwords
 
 use super::safety::{check_null, check_null_mut, ffi_safe_call};
-use super::types::{VInputCommand, VInputEvent, VInputEventType, VInputFFIResult};
+use super::types::{VInputCommand, VInputCommandCallback, VInputEvent, VInputEventType, VInputFFIResult};
 use crate::audio::{AudioRingBuffer, AudioRingBufferConfig, PipeWireStream, PipeWireStreamConfig};
 use crate::config::VInputConfig;
 use crate::hotwords::HotwordsEngine;
 use crate::itn::{ITNEngine, ITNMode};
 use crate::streaming::{StreamingConfig, StreamingPipeline};
+use crate::undo::RecognitionHistory;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -19,16 +20,21 @@ use std::thread;
 /// 全局 V-Input Core 实例
 static VINPUT_CORE: Mutex<Option<VInputCoreState>> = Mutex::new(None);
 
+/// 全局命令回调函数
+static COMMAND_CALLBACK: Mutex<Option<VInputCommandCallback>> = Mutex::new(None);
+
 /// V-Input Core 完整状态
 struct VInputCoreState {
     /// 流式识别管道
     pipeline: Arc<Mutex<StreamingPipeline>>,
-    /// ITN 引擎
-    itn_engine: ITNEngine,
+    /// ITN 引擎（共享，供音频线程使用）
+    itn_engine: Arc<Mutex<ITNEngine>>,
     /// 热词引擎
     hotwords_engine: Option<HotwordsEngine>,
-    /// 命令队列
-    command_queue: VecDeque<VInputCommand>,
+    /// 命令队列（共享，供音频线程使用）
+    command_queue: Arc<Mutex<VecDeque<VInputCommand>>>,
+    /// 识别历史（用于撤销/重试）
+    recognition_history: Arc<Mutex<RecognitionHistory>>,
     /// 录音状态
     is_recording: bool,
     /// 音频处理线程句柄
@@ -65,8 +71,7 @@ impl VInputCoreState {
             vad_config: config.vad.clone(),
             asr_config: config.asr.clone(),
             punctuation_profile: config.punctuation.clone(),
-            max_silence_duration_ms: 3000,
-            enable_endpoint_detection: true,
+            endpoint_config: config.endpoint.clone(),
         };
         let pipeline = StreamingPipeline::new(streaming_config)?;
 
@@ -93,9 +98,10 @@ impl VInputCoreState {
 
         Ok(Self {
             pipeline: Arc::new(Mutex::new(pipeline)),
-            itn_engine,
+            itn_engine: Arc::new(Mutex::new(itn_engine)),
             hotwords_engine,
-            command_queue: VecDeque::new(),
+            command_queue: Arc::new(Mutex::new(VecDeque::new())),
+            recognition_history: Arc::new(Mutex::new(RecognitionHistory::new(50))),
             is_recording: false,
             audio_thread: None,
             stop_signal: Arc::new(Mutex::new(false)),
@@ -137,9 +143,12 @@ impl VInputCoreState {
                 // 启动音频处理线程
                 let pipeline = Arc::clone(&self.pipeline);
                 let stop_signal = Arc::clone(&self.stop_signal);
+                let command_queue = Arc::clone(&self.command_queue);
+                let itn_engine = Arc::clone(&self.itn_engine);
+                let recognition_history = Arc::clone(&self.recognition_history);
 
                 self.audio_thread = Some(thread::spawn(move || {
-                    Self::audio_processing_loop(pipeline, consumer, stop_signal);
+                    Self::audio_processing_loop(pipeline, consumer, stop_signal, command_queue, itn_engine, recognition_history);
                 }));
             }
             Err(e) => {
@@ -154,6 +163,9 @@ impl VInputCoreState {
         pipeline: Arc<Mutex<StreamingPipeline>>,
         mut consumer: crate::audio::AudioRingConsumer,
         stop_signal: Arc<Mutex<bool>>,
+        _command_queue: Arc<Mutex<VecDeque<VInputCommand>>>,
+        itn_engine: Arc<Mutex<ITNEngine>>,
+        recognition_history: Arc<Mutex<RecognitionHistory>>,
     ) {
         tracing::info!("音频处理线程启动");
 
@@ -191,6 +203,72 @@ impl VInputCoreState {
                         if !result.partial_result.is_empty() {
                             tracing::debug!("识别中: {}", result.partial_result);
                         }
+
+                        // 🎯 检测到句子结束（端点检测）
+                        use crate::streaming::PipelineState;
+                        if result.pipeline_state == PipelineState::Completed {
+                            tracing::info!("🔔 检测到句子结束，自动提交结果");
+
+                            // 获取带标点的最终结果
+                            let raw_result_with_punct = pipe.get_final_result_with_punctuation();
+
+                            if !raw_result_with_punct.is_empty() {
+                                tracing::info!("🎤 识别结果（含智能标点）: [{}]", raw_result_with_punct);
+
+                                // 应用 ITN
+                                let final_result = if let Ok(itn) = itn_engine.lock() {
+                                    tracing::info!("📝 开始 ITN 处理...");
+                                    let itn_result = itn.process(&raw_result_with_punct);
+
+                                    if !itn_result.changes.is_empty() {
+                                        tracing::info!("✏️  ITN 完成: {} 处变更", itn_result.changes.len());
+                                        for change in &itn_result.changes {
+                                            tracing::info!("    '{}' → '{}'", change.original_text, change.normalized_text);
+                                        }
+                                    } else {
+                                        tracing::info!("📋 ITN: 无需变更（输入已是规范格式）");
+                                    }
+
+                                    itn_result.text
+                                } else {
+                                    raw_result_with_punct
+                                };
+
+                                tracing::info!("✅ 最终结果: [{}]", final_result);
+
+                                // 记录到历史
+                                if let Ok(mut history) = recognition_history.lock() {
+                                    history.push(final_result.clone());
+                                    tracing::debug!("已记录到历史，当前历史数: {}", history.len());
+                                }
+
+                                // 🎯 直接调用回调函数（零延迟！）
+                                if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                    tracing::info!("📞 调用 C++ 回调函数");
+
+                                    // 生成命令并直接回调
+                                    let cmd1 = VInputCommand::show_candidate(&final_result);
+                                    callback(&cmd1 as *const VInputCommand);
+                                    vinput_command_free(&cmd1 as *const VInputCommand as *mut VInputCommand);
+
+                                    let cmd2 = VInputCommand::commit_text(&final_result);
+                                    callback(&cmd2 as *const VInputCommand);
+                                    vinput_command_free(&cmd2 as *const VInputCommand as *mut VInputCommand);
+
+                                    let cmd3 = VInputCommand::hide_candidate();
+                                    callback(&cmd3 as *const VInputCommand);
+                                    vinput_command_free(&cmd3 as *const VInputCommand as *mut VInputCommand);
+
+                                    tracing::info!("✨ 已通过回调发送 3 个命令（零延迟上屏）");
+                                } else {
+                                    tracing::warn!("⚠️  回调未注册，无法自动上屏");
+                                }
+                            }
+
+                            // 重置 Pipeline 准备下一句
+                            let _ = pipe.reset();
+                            tracing::info!("🔄 Pipeline 已重置，准备接收下一句");
+                        }
                     }
                     Err(e) => {
                         tracing::error!("管道处理错误: {}", e);
@@ -210,7 +288,7 @@ impl VInputCoreState {
             return;
         }
 
-        tracing::info!("停止录音");
+        tracing::info!("🛑 手动停止录音");
         self.is_recording = false;
 
         // 停止 PipeWire 流
@@ -243,7 +321,14 @@ impl VInputCoreState {
 
         // 应用 ITN (文本规范化)
         tracing::info!("📝 开始 ITN 处理...");
-        let itn_result = self.itn_engine.process(&raw_result_with_punct);
+        let itn_result = if let Ok(itn) = self.itn_engine.lock() {
+            itn.process(&raw_result_with_punct)
+        } else {
+            crate::itn::ITNResult {
+                text: raw_result_with_punct.clone(),
+                changes: Vec::new(),
+            }
+        };
         let final_result = itn_result.text;
 
         if !itn_result.changes.is_empty() {
@@ -257,25 +342,28 @@ impl VInputCoreState {
 
         tracing::info!("✅ 最终结果: [{}]", final_result);
 
+        // 记录到历史
+        if let Ok(mut history) = self.recognition_history.lock() {
+            history.push(final_result.clone());
+            tracing::debug!("已记录到历史，当前历史数: {}", history.len());
+        }
+
         // 生成命令序列
-        // 1. 显示候选词（可以有多个候选）
-        self.command_queue
-            .push_back(VInputCommand::show_candidate(&final_result));
-
-        // 2. 提交最终文本
-        self.command_queue
-            .push_back(VInputCommand::commit_text(&final_result));
-
-        // 3. 隐藏候选词
-        self.command_queue
-            .push_back(VInputCommand::hide_candidate());
-
-        tracing::info!("生成 {} 个命令", self.command_queue.len());
+        if let Ok(mut queue) = self.command_queue.lock() {
+            queue.push_back(VInputCommand::show_candidate(&final_result));
+            queue.push_back(VInputCommand::commit_text(&final_result));
+            queue.push_back(VInputCommand::hide_candidate());
+            tracing::info!("生成 {} 个命令", queue.len());
+        }
     }
 
     /// 尝试接收命令
     fn try_recv_command(&mut self) -> Option<VInputCommand> {
-        self.command_queue.pop_front()
+        if let Ok(mut queue) = self.command_queue.lock() {
+            queue.pop_front()
+        } else {
+            None
+        }
     }
 }
 
@@ -343,6 +431,26 @@ pub extern "C" fn vinput_core_shutdown() -> VInputFFIResult {
     }
 }
 
+/// 注册命令回调函数
+///
+/// C++ 插件在初始化时调用此函数，注册回调以接收实时命令
+/// 当 Rust Core 检测到句子结束时，会直接调用此回调
+#[no_mangle]
+pub extern "C" fn vinput_core_register_callback(callback: VInputCommandCallback) -> VInputFFIResult {
+    match ffi_safe_call(|| {
+        tracing::info!("V-Input Core FFI: 注册命令回调");
+
+        let mut callback_lock = COMMAND_CALLBACK.lock().unwrap();
+        *callback_lock = Some(callback);
+
+        tracing::info!("✅ 命令回调注册成功");
+        Ok(VInputFFIResult::Success)
+    }) {
+        Ok(result) => result,
+        Err(e) => e,
+    }
+}
+
 /// 发送事件到 V-Input Core
 #[no_mangle]
 pub extern "C" fn vinput_core_send_event(event: *const VInputEvent) -> VInputFFIResult {
@@ -364,6 +472,34 @@ pub extern "C" fn vinput_core_send_event(event: *const VInputEvent) -> VInputFFI
             VInputEventType::StopRecording => {
                 tracing::info!("接收事件: StopRecording");
                 core.stop_recording();
+            }
+            VInputEventType::UndoRequest => {
+                tracing::info!("接收事件: UndoRequest");
+                if let Ok(mut history) = core.recognition_history.lock() {
+                    if let Some(undone_text) = history.undo() {
+                        tracing::info!("撤销文本: {}", undone_text);
+                        // 生成撤销命令
+                        if let Ok(mut queue) = core.command_queue.lock() {
+                            queue.push_back(VInputCommand::undo_text(&undone_text));
+                        }
+                    } else {
+                        tracing::warn!("没有可撤销的内容");
+                    }
+                }
+            }
+            VInputEventType::RedoRequest => {
+                tracing::info!("接收事件: RedoRequest");
+                if let Ok(mut history) = core.recognition_history.lock() {
+                    if let Some(redone_text) = history.redo() {
+                        tracing::info!("重试文本: {}", redone_text);
+                        // 生成重试命令
+                        if let Ok(mut queue) = core.command_queue.lock() {
+                            queue.push_back(VInputCommand::redo_text(&redone_text));
+                        }
+                    } else {
+                        tracing::warn!("没有可重试的内容");
+                    }
+                }
             }
             _ => {
                 tracing::debug!("接收事件: {:?} (暂不处理)", event.event_type);
@@ -426,4 +562,112 @@ pub extern "C" fn vinput_command_free(command: *mut VInputCommand) {
 pub extern "C" fn vinput_core_version() -> *const c_char {
     static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
     VERSION.as_ptr() as *const c_char
+}
+
+/// 音频设备信息（FFI 兼容）
+#[repr(C)]
+pub struct VInputAudioDevice {
+    /// 设备 ID（需要调用者释放）
+    pub id: *mut c_char,
+    /// 设备名称（需要调用者释放）
+    pub name: *mut c_char,
+    /// 设备描述（需要调用者释放）
+    pub description: *mut c_char,
+    /// 是否为默认设备
+    pub is_default: bool,
+}
+
+/// 音频设备列表（FFI 兼容）
+#[repr(C)]
+pub struct VInputAudioDeviceList {
+    /// 设备数组指针
+    pub devices: *mut VInputAudioDevice,
+    /// 设备数量
+    pub count: usize,
+}
+
+/// 枚举音频输入设备
+///
+/// # 返回值
+/// 成功返回设备列表指针，失败返回 null
+/// 调用者需要使用 vinput_audio_device_list_free 释放内存
+#[no_mangle]
+pub extern "C" fn vinput_enumerate_audio_devices() -> *mut VInputAudioDeviceList {
+    use super::safety::to_ffi_result;
+
+    ffi_safe_call(|| {
+        use crate::audio::enumerate_audio_devices;
+
+        // 枚举设备
+        let devices = to_ffi_result(enumerate_audio_devices())?;
+
+        // 转换为 FFI 兼容格式
+        let mut ffi_devices: Vec<VInputAudioDevice> = Vec::with_capacity(devices.len());
+
+        for device in devices {
+            let id = CString::new(device.id).unwrap_or_default();
+            let name = CString::new(device.name).unwrap_or_default();
+            let description = CString::new(device.description).unwrap_or_default();
+
+            ffi_devices.push(VInputAudioDevice {
+                id: id.into_raw(),
+                name: name.into_raw(),
+                description: description.into_raw(),
+                is_default: device.is_default,
+            });
+        }
+
+        // 创建设备列表
+        let list = Box::new(VInputAudioDeviceList {
+            devices: ffi_devices.as_mut_ptr(),
+            count: ffi_devices.len(),
+        });
+
+        // 防止 Vec 被释放
+        std::mem::forget(ffi_devices);
+
+        Ok(Box::into_raw(list))
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// 释放音频设备列表
+#[no_mangle]
+pub extern "C" fn vinput_audio_device_list_free(list: *mut VInputAudioDeviceList) {
+    if list.is_null() {
+        return;
+    }
+
+    unsafe {
+        let list_box = Box::from_raw(list);
+
+        // 释放每个设备的字符串
+        if !list_box.devices.is_null() {
+            let devices_slice = std::slice::from_raw_parts_mut(
+                list_box.devices,
+                list_box.count
+            );
+
+            for device in devices_slice {
+                if !device.id.is_null() {
+                    let _ = CString::from_raw(device.id);
+                }
+                if !device.name.is_null() {
+                    let _ = CString::from_raw(device.name);
+                }
+                if !device.description.is_null() {
+                    let _ = CString::from_raw(device.description);
+                }
+            }
+
+            // 释放设备数组
+            let _ = Vec::from_raw_parts(
+                list_box.devices,
+                list_box.count,
+                list_box.count
+            );
+        }
+
+        // list_box 自动释放
+    }
 }

@@ -27,7 +27,18 @@
       "Bash(readelf:*)",
       "Bash(c++filt _ZN5fcitx17InputMethodEngine8keyEventERKNS_16InputMethodEntryERNS_8KeyEventE)",
       "Bash(cargo check:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash(pw-cli list-objects:*)",
+      "Bash(pactl list:*)",
+      "Bash(pactl info:*)",
+      "Bash(cargo test:*)",
+      "Bash(examples/test_device_enum.rs:*)",
+      "Bash(cargo run:*)",
+      "Bash(make:*)",
+      "Bash(cmake --build:*)",
+      "Bash(cargo clean:*)",
+      "Bash(./integration-test.sh:*)",
+      "Bash(sudo make install:*)"
     ]
   }
 }

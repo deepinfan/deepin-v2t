@@ -4,15 +4,28 @@
 //! - 热词管理
 //! - 标点风格选择
 //! - VAD/ASR 参数调整
+//! - 端点检测配置
 
 use eframe::egui;
 
 mod config;
+mod basic_settings_panel;
+mod recognition_settings_panel;
+mod model_manager_panel;
+mod advanced_settings_panel;
+mod about_panel;
+mod endpoint_panel;
 mod hotwords_editor;
 mod punctuation_panel;
 mod vad_asr_panel;
 
 use config::VInputConfig;
+use basic_settings_panel::BasicSettingsPanel;
+use recognition_settings_panel::RecognitionSettingsPanel;
+use model_manager_panel::ModelManagerPanel;
+use advanced_settings_panel::AdvancedSettingsPanel;
+use about_panel::AboutPanel;
+use endpoint_panel::EndpointPanel;
 use hotwords_editor::HotwordsEditor;
 use punctuation_panel::PunctuationPanel;
 use vad_asr_panel::VadAsrPanel;
@@ -42,21 +55,39 @@ struct VInputApp {
     active_tab: Tab,
     /// 配置
     config: VInputConfig,
+    /// 基本设置面板
+    basic_settings_panel: BasicSettingsPanel,
+    /// 识别设置面板
+    recognition_settings_panel: RecognitionSettingsPanel,
+    /// 模型管理面板
+    model_manager_panel: ModelManagerPanel,
+    /// 高级设置面板
+    advanced_settings_panel: AdvancedSettingsPanel,
+    /// 关于面板
+    about_panel: AboutPanel,
     /// 热词编辑器
     hotwords_editor: HotwordsEditor,
     /// 标点面板
     punctuation_panel: PunctuationPanel,
     /// VAD/ASR 面板
     vad_asr_panel: VadAsrPanel,
+    /// 端点检测面板
+    endpoint_panel: EndpointPanel,
     /// 配置是否已修改
     config_modified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Basic,
+    Recognition,
+    Models,
     Hotwords,
     Punctuation,
+    Advanced,
     VadAsr,
+    Endpoint,
+    About,
 }
 
 impl VInputApp {
@@ -68,10 +99,16 @@ impl VInputApp {
         let config = VInputConfig::load().unwrap_or_default();
 
         Self {
-            active_tab: Tab::Hotwords,
+            active_tab: Tab::Basic,
+            basic_settings_panel: BasicSettingsPanel::new(&config),
+            recognition_settings_panel: RecognitionSettingsPanel::new(&config),
+            model_manager_panel: ModelManagerPanel::new(&config),
+            advanced_settings_panel: AdvancedSettingsPanel::new(&config),
+            about_panel: AboutPanel::new(&config),
             hotwords_editor: HotwordsEditor::new(&config),
             punctuation_panel: PunctuationPanel::new(&config),
             vad_asr_panel: VadAsrPanel::new(&config),
+            endpoint_panel: EndpointPanel::new(&config),
             config,
             config_modified: false,
         }
@@ -123,9 +160,14 @@ impl VInputApp {
 
     fn save_config(&mut self) {
         // 从各个面板收集配置
+        self.basic_settings_panel.apply_to_config(&mut self.config);
+        self.recognition_settings_panel.apply_to_config(&mut self.config);
+        self.model_manager_panel.apply_to_config(&mut self.config);
+        self.advanced_settings_panel.apply_to_config(&mut self.config);
         self.hotwords_editor.apply_to_config(&mut self.config);
         self.punctuation_panel.apply_to_config(&mut self.config);
         self.vad_asr_panel.apply_to_config(&mut self.config);
+        self.endpoint_panel.apply_to_config(&mut self.config);
 
         // 保存到文件
         if let Err(e) = self.config.save() {
@@ -138,9 +180,14 @@ impl VInputApp {
 
     fn reset_config(&mut self) {
         self.config = VInputConfig::default();
+        self.basic_settings_panel = BasicSettingsPanel::new(&self.config);
+        self.recognition_settings_panel = RecognitionSettingsPanel::new(&self.config);
+        self.model_manager_panel = ModelManagerPanel::new(&self.config);
+        self.advanced_settings_panel = AdvancedSettingsPanel::new(&self.config);
         self.hotwords_editor = HotwordsEditor::new(&self.config);
         self.punctuation_panel = PunctuationPanel::new(&self.config);
         self.vad_asr_panel = VadAsrPanel::new(&self.config);
+        self.endpoint_panel = EndpointPanel::new(&self.config);
         self.config_modified = true;
     }
 }
@@ -199,6 +246,27 @@ impl eframe::App for VInputApp {
             ui.separator();
 
             if ui
+                .selectable_label(self.active_tab == Tab::Basic, "⚙️ 基本设置")
+                .clicked()
+            {
+                self.active_tab = Tab::Basic;
+            }
+
+            if ui
+                .selectable_label(self.active_tab == Tab::Recognition, "🎙️ 识别设置")
+                .clicked()
+            {
+                self.active_tab = Tab::Recognition;
+            }
+
+            if ui
+                .selectable_label(self.active_tab == Tab::Models, "📦 模型管理")
+                .clicked()
+            {
+                self.active_tab = Tab::Models;
+            }
+
+            if ui
                 .selectable_label(self.active_tab == Tab::Hotwords, "🔥 热词管理")
                 .clicked()
             {
@@ -213,16 +281,57 @@ impl eframe::App for VInputApp {
             }
 
             if ui
+                .selectable_label(self.active_tab == Tab::Advanced, "🔧 高级设置")
+                .clicked()
+            {
+                self.active_tab = Tab::Advanced;
+            }
+
+            if ui
+                .selectable_label(self.active_tab == Tab::Endpoint, "🎯 端点检测")
+                .clicked()
+            {
+                self.active_tab = Tab::Endpoint;
+            }
+
+            if ui
                 .selectable_label(self.active_tab == Tab::VadAsr, "🎤 VAD/ASR")
                 .clicked()
             {
                 self.active_tab = Tab::VadAsr;
+            }
+
+            ui.separator();
+
+            if ui
+                .selectable_label(self.active_tab == Tab::About, "ℹ️ 关于")
+                .clicked()
+            {
+                self.active_tab = Tab::About;
             }
         });
 
         // 中央面板
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.active_tab {
+                Tab::Basic => {
+                    let modified = self.basic_settings_panel.ui(ui);
+                    if modified {
+                        self.config_modified = true;
+                    }
+                }
+                Tab::Recognition => {
+                    let modified = self.recognition_settings_panel.ui(ui);
+                    if modified {
+                        self.config_modified = true;
+                    }
+                }
+                Tab::Models => {
+                    let modified = self.model_manager_panel.ui(ui);
+                    if modified {
+                        self.config_modified = true;
+                    }
+                }
                 Tab::Hotwords => {
                     let modified = self.hotwords_editor.ui(ui);
                     if modified {
@@ -235,11 +344,26 @@ impl eframe::App for VInputApp {
                         self.config_modified = true;
                     }
                 }
+                Tab::Advanced => {
+                    let modified = self.advanced_settings_panel.ui(ui);
+                    if modified {
+                        self.config_modified = true;
+                    }
+                }
                 Tab::VadAsr => {
                     let modified = self.vad_asr_panel.ui(ui);
                     if modified {
                         self.config_modified = true;
                     }
+                }
+                Tab::Endpoint => {
+                    let modified = self.endpoint_panel.ui(ui);
+                    if modified {
+                        self.config_modified = true;
+                    }
+                }
+                Tab::About => {
+                    self.about_panel.ui(ui);
                 }
             }
         });

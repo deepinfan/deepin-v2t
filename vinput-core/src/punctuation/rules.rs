@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_should_insert_comma_before() {
-        let layer = RuleLayer::new(StyleProfile::professional());
+        let layer = RuleLayer::new(StyleProfile::from_preset("Professional"));
 
         // token 数不足
         assert!(!layer.should_insert_comma_before("所以", 5));
@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_should_end_with_question_strict_mode() {
-        let layer = RuleLayer::new(StyleProfile::professional());
+        let layer = RuleLayer::new(StyleProfile::from_preset("Professional"));
 
         // 严格模式，有问号关键词但无能量上扬
         assert!(!layer.should_end_with_question("你好吗", false));
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_should_end_with_question_non_strict() {
-        let layer = RuleLayer::new(StyleProfile::balanced());
+        let layer = RuleLayer::new(StyleProfile::from_preset("Balanced"));
 
         // 非严格模式，有问号关键词即可
         assert!(layer.should_end_with_question("你好吗", false));
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_should_insert_period() {
-        let layer = RuleLayer::new(StyleProfile::professional());
+        let layer = RuleLayer::new(StyleProfile::from_preset("Professional"));
 
         // 静音不足 800ms
         assert!(!layer.should_insert_period("测试句子", 500));
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn test_no_question_without_keyword() {
-        let layer = RuleLayer::new(StyleProfile::professional());
+        let layer = RuleLayer::new(StyleProfile::from_preset("Professional"));
 
         assert!(!layer.should_end_with_question("这是一句普通的话", false));
         assert!(!layer.should_end_with_question("这是一句普通的话", true));
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_logic_word_min_tokens() {
-        let mut profile = StyleProfile::professional();
+        let mut profile = StyleProfile::from_preset("Professional");
         profile.logic_word_min_tokens = 12;
 
         let layer = RuleLayer::new(profile);

@@ -38,25 +38,41 @@ impl ChineseNumberConverter {
         };
 
         // 检查是否包含小数点
+        // 注意：只有当 "点" 前后都有数字字符时才视为小数点
         if let Some(dot_pos) = text.find('点') {
             let integer_part = &text[..dot_pos];
             let decimal_part = &text[dot_pos + 3..]; // "点" 是 3 字节
 
-            let integer = if integer_part.is_empty() {
-                0
-            } else {
-                Self::parse_integer(integer_part)?
-            };
+            // 检查 "点" 前面是否有数字字符
+            let has_digit_before = integer_part.chars().any(|c| matches!(c,
+                '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' |
+                '十' | '百' | '千' | '万' | '亿'
+            ));
 
-            let decimal = Self::parse_decimal(decimal_part)?;
+            // 检查 "点" 后面是否有数字字符
+            let has_digit_after = !decimal_part.is_empty() && decimal_part.chars().next().map_or(false, |c| matches!(c,
+                '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九'
+            ));
 
-            let result = if is_negative {
-                format!("-{}.{}", integer, decimal)
-            } else {
-                format!("{}.{}", integer, decimal)
-            };
+            // 只有当 "点" 前后都有数字字符时才作为小数点处理
+            if has_digit_before && has_digit_after {
+                let integer = if integer_part.is_empty() {
+                    0
+                } else {
+                    Self::parse_integer(integer_part)?
+                };
 
-            return Ok(result);
+                let decimal = Self::parse_decimal(decimal_part)?;
+
+                let result = if is_negative {
+                    format!("-{}.{}", integer, decimal)
+                } else {
+                    format!("{}.{}", integer, decimal)
+                };
+
+                return Ok(result);
+            }
+            // 如果 "点" 前后没有数字字符，则不是小数点，继续作为整数处理
         }
 
         // 纯整数

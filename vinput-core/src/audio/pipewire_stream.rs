@@ -133,65 +133,6 @@ impl Drop for PipeWireStream {
 /// PipeWire 主循环（运行在独立线程）
 fn run_pipewire_loop(
     config: PipeWireStreamConfig,
-    producer: AudioRingProducer,
-    running: Arc<AtomicBool>,
-    quit_signal: Arc<AtomicBool>,
-) -> VInputResult<()> {
-    tracing::info!("PipeWire 流线程启动");
-
-    #[cfg(feature = "pipewire-capture")]
-    return run_real_pipewire_loop(config, producer, running, quit_signal);
-
-    #[cfg(not(feature = "pipewire-capture"))]
-    return run_simulated_pipewire_loop(config, producer, running, quit_signal);
-}
-
-/// 模拟 PipeWire 主循环（用于开发和测试）
-#[cfg(not(feature = "pipewire-capture"))]
-fn run_simulated_pipewire_loop(
-    config: PipeWireStreamConfig,
-    mut producer: AudioRingProducer,
-    running: Arc<AtomicBool>,
-    quit_signal: Arc<AtomicBool>,
-) -> VInputResult<()> {
-    tracing::warn!("PipeWire 模拟模式 - 生成静音音频");
-    tracing::warn!("要使用真实音频捕获，请使用 --features pipewire-capture 编译");
-
-    running.store(true, Ordering::Release);
-
-    // 模拟音频捕获
-    let mut sample_count = 0u64;
-    while !quit_signal.load(Ordering::Acquire) {
-        thread::sleep(Duration::from_millis(32)); // 模拟 32ms 音频帧
-
-        // 生成模拟音频数据（静音）
-        let frame_size = (config.sample_rate / 1000 * 32) as usize; // 32ms
-        let samples = vec![0.0f32; frame_size];
-
-        match producer.write(&samples) {
-            Ok(written) => {
-                sample_count += written as u64;
-                if sample_count % (config.sample_rate as u64) == 0 {
-                    tracing::trace!("模拟捕获: {} 秒", sample_count / config.sample_rate as u64);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Ring Buffer 写入失败: {:?}", e);
-            }
-        }
-    }
-
-    running.store(false, Ordering::Release);
-    tracing::info!("PipeWire 模拟流停止，共生成 {:.2} 秒音频",
-        sample_count as f32 / config.sample_rate as f32);
-
-    Ok(())
-}
-
-/// 真实 PipeWire 主循环（使用 pw-record 子进程）
-#[cfg(feature = "pipewire-capture")]
-fn run_real_pipewire_loop(
-    config: PipeWireStreamConfig,
     mut producer: AudioRingProducer,
     running: Arc<AtomicBool>,
     quit_signal: Arc<AtomicBool>,
@@ -199,6 +140,7 @@ fn run_real_pipewire_loop(
     use std::process::{Command, Stdio};
     use std::io::Read;
 
+    tracing::info!("PipeWire 流线程启动");
     tracing::info!("PipeWire 真实音频捕获模式 (pw-record)");
 
     // 启动 pw-record 子进程
@@ -284,10 +226,107 @@ fn run_real_pipewire_loop(
 
 /// 枚举可用的音频设备
 pub fn enumerate_audio_devices() -> VInputResult<Vec<AudioDevice>> {
-    tracing::warn!("enumerate_audio_devices 尚未实现");
-    // TODO Phase 1.1: 实现设备枚举
-    // 使用 PipeWire registry 枚举音频源节点
-    Ok(vec![])
+    use std::process::Command;
+
+    tracing::info!("开始枚举音频输入设备");
+
+    // 使用 pactl 枚举音频源
+    let output = Command::new("pactl")
+        .args(&["list", "sources", "short"])
+        .output()
+        .map_err(|e| VInputError::PipeWire(
+            format!("执行 pactl 失败: {}", e)
+        ))?;
+
+    if !output.status.success() {
+        return Err(VInputError::PipeWire(
+            "pactl 命令执行失败".to_string()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut devices = Vec::new();
+
+    // 解析 pactl 输出
+    // 格式: ID\tNAME\tDRIVER\tFORMAT\tSTATE
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let id = parts[0].trim();
+        let name = parts[1].trim();
+
+        // 过滤掉 monitor 设备（这些是输出设备的监听器）
+        if name.contains(".monitor") {
+            continue;
+        }
+
+        // 生成友好的描述
+        let description = generate_device_description(name);
+
+        devices.push(AudioDevice {
+            id: id.to_string(),
+            name: name.to_string(),
+            description,
+            is_default: false, // 稍后标记默认设备
+        });
+    }
+
+    // 获取默认设备
+    if let Ok(default_output) = Command::new("pactl")
+        .args(&["get-default-source"])
+        .output()
+    {
+        if default_output.status.success() {
+            let default_name = String::from_utf8_lossy(&default_output.stdout).trim().to_string();
+            for device in &mut devices {
+                if device.name == default_name {
+                    device.is_default = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    tracing::info!("找到 {} 个音频输入设备", devices.len());
+    for device in &devices {
+        tracing::debug!("  - {} ({}){}",
+            device.description,
+            device.name,
+            if device.is_default { " [默认]" } else { "" }
+        );
+    }
+
+    Ok(devices)
+}
+
+/// 生成友好的设备描述
+fn generate_device_description(name: &str) -> String {
+    // 尝试从设备名称提取友好描述
+    if name.starts_with("alsa_input.") {
+        // ALSA 设备
+        if name.contains("Mic1") {
+            return "内置麦克风 1".to_string();
+        } else if name.contains("Mic2") {
+            return "内置麦克风 2".to_string();
+        } else if name.contains("Headset") {
+            return "耳机麦克风".to_string();
+        } else if name.contains("USB") {
+            return "USB 麦克风".to_string();
+        }
+        return "ALSA 音频输入".to_string();
+    } else if name.starts_with("bluez_") {
+        return "蓝牙音频输入".to_string();
+    } else if name.contains("echo-cancel") {
+        return "回声消除音频源".to_string();
+    } else if name == "null-sink" {
+        return "空音频源".to_string();
+    }
+
+    // 默认使用设备名称
+    name.to_string()
 }
 
 /// 音频设备信息

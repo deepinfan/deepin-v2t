@@ -2,7 +2,8 @@
 //!
 //! 将 VAD 检测结果与 ASR 识别器连接，实现端到端的流式语音识别
 
-use crate::asr::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream, RecognitionResult};
+use crate::asr::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
+use crate::endpointing::{EndpointDetector, EndpointDetectorConfig, EndpointResult};
 use crate::error::VInputResult;
 use crate::punctuation::{PunctuationEngine, StyleProfile};
 use crate::vad::{VadConfig, VadManager, VadState};
@@ -17,10 +18,8 @@ pub struct StreamingConfig {
     pub asr_config: OnlineRecognizerConfig,
     /// 标点风格配置
     pub punctuation_profile: StyleProfile,
-    /// 最大静音等待时间 (ms) - 超过此时间后强制结束识别
-    pub max_silence_duration_ms: u64,
-    /// 启用端点检测
-    pub enable_endpoint_detection: bool,
+    /// 端点检测配置
+    pub endpoint_config: EndpointDetectorConfig,
 }
 
 impl Default for StreamingConfig {
@@ -29,8 +28,7 @@ impl Default for StreamingConfig {
             vad_config: VadConfig::push_to_talk_default(),
             asr_config: OnlineRecognizerConfig::default(),
             punctuation_profile: StyleProfile::default(),
-            max_silence_duration_ms: 3000,
-            enable_endpoint_detection: true,
+            endpoint_config: EndpointDetectorConfig::default(),
         }
     }
 }
@@ -70,19 +68,16 @@ pub struct StreamingPipeline {
     asr_recognizer: OnlineRecognizer,
     asr_stream: Option<OnlineStream<'static>>,
     punctuation_engine: PunctuationEngine,
+    endpoint_detector: EndpointDetector,
     pipeline_state: PipelineState,
 
     /// 语音开始时间
     speech_start_time: Option<Instant>,
-    /// 最后一次语音活动时间
-    last_speech_time: Option<Instant>,
 
     /// 累积的音频帧数（用于调试）
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
-    /// VAD 静音时长（毫秒）
-    vad_silence_ms: u64,
 }
 
 impl StreamingPipeline {
@@ -92,23 +87,27 @@ impl StreamingPipeline {
             config.punctuation_profile.streaming_pause_ratio,
             config.punctuation_profile.streaming_min_tokens
         );
+        tracing::info!("🎯 端点检测配置: trailing_silence={}ms, min_speech={}ms",
+            config.endpoint_config.trailing_silence_ms,
+            config.endpoint_config.min_speech_duration_ms
+        );
 
         let vad_manager = VadManager::new(config.vad_config.clone())?;
         let asr_recognizer = OnlineRecognizer::new(&config.asr_config)?;
         let punctuation_engine = PunctuationEngine::new(config.punctuation_profile.clone());
+        let endpoint_detector = EndpointDetector::new(config.endpoint_config.clone());
 
         Ok(Self {
             config,
             vad_manager,
             asr_recognizer,
             punctuation_engine,
+            endpoint_detector,
             asr_stream: None,
             pipeline_state: PipelineState::Idle,
             speech_start_time: None,
-            last_speech_time: None,
             total_frames: 0,
             asr_frames: 0,
-            vad_silence_ms: 0,
         })
     }
 
@@ -127,119 +126,116 @@ impl StreamingPipeline {
         let vad_result = self.vad_manager.process(samples)?;
         let now = Instant::now();
 
-        // 2. 根据 VAD 状态管理 ASR 流
-        match (self.pipeline_state, vad_result.state) {
-            // 从空闲状态检测到语音开始
-            (PipelineState::Idle, VadState::Speech) if vad_result.state_changed => {
-                tracing::info!("Pipeline: Speech detected, starting ASR");
+        // 1.5 将音频送入端点检测器（用于能量分析）
+        if self.pipeline_state == PipelineState::Recognizing {
+            self.endpoint_detector.feed_audio(samples);
+        }
 
-                // 创建新的 ASR 流
-                let mut stream = self.asr_recognizer.create_stream()?;
+        // 2. 端点检测处理（使用 EndpointDetector）
+        let is_speech = matches!(vad_result.state, VadState::Speech | VadState::SpeechCandidate);
+        let endpoint_result = self.endpoint_detector.process_vad(is_speech);
 
-                // 注入 Pre-roll 音频（如果有）
-                if let Some(pre_roll_audio) = &vad_result.pre_roll_audio {
-                    if !pre_roll_audio.is_empty() {
-                        stream.accept_waveform(
-                            pre_roll_audio,
-                            self.config.vad_config.silero.sample_rate as i32,
-                        );
-                        self.asr_frames += 1;
-                        tracing::debug!(
-                            "Pipeline: Injected {} pre-roll samples",
-                            pre_roll_audio.len()
-                        );
-                    }
-                }
-
-                // 存储流的生命周期（需要 unsafe transmute 来绕过生命周期检查）
-                // 安全性：stream 的生命周期由 self.asr_stream 管理，在 reset 时会被销毁
-                let stream_static: OnlineStream<'static> = unsafe {
-                    std::mem::transmute(stream)
-                };
-                self.asr_stream = Some(stream_static);
-
-                self.pipeline_state = PipelineState::Recognizing;
-                self.speech_start_time = Some(now);
-                self.last_speech_time = Some(now);
+        // 3. 根据端点检测结果处理状态
+        match endpoint_result {
+            EndpointResult::TooShort => {
+                // 语音过短，忽略并重置
+                tracing::info!("Pipeline: 语音过短，忽略");
+                self.reset()?;
+                self.pipeline_state = PipelineState::Idle;
             }
-
-            // 识别中，继续送入音频
-            (PipelineState::Recognizing, VadState::Speech | VadState::SpeechCandidate) => {
-                if self.asr_stream.is_some() {
-                    let samples_vec = samples.to_vec();
-                    self.feed_audio_to_asr_internal(&samples_vec)?;
-                    self.last_speech_time = Some(now);
-                }
-            }
-
-            // 检测到语音结束
-            (PipelineState::Recognizing, VadState::Silence) if vad_result.state_changed => {
-                // 计算静音时长
-                if let Some(last_time) = self.last_speech_time {
-                    self.vad_silence_ms = now.duration_since(last_time).as_millis() as u64;
-                }
-
-                tracing::info!("Pipeline: Speech ended (silence: {}ms), finalizing ASR", self.vad_silence_ms);
-
+            EndpointResult::ForcedSegmentation => {
+                // 语音过长，强制分段
+                tracing::info!("Pipeline: 语音过长，强制分段");
                 if let Some(stream) = &mut self.asr_stream {
-                    // 标记输入结束
                     stream.input_finished();
-
-                    // 最后一次解码
-                    if stream.is_ready(&self.asr_recognizer) {
-                        stream.decode(&self.asr_recognizer);
-                    }
                 }
-
                 self.pipeline_state = PipelineState::Completed;
             }
-
-            // 识别中，检查静音超时
-            (PipelineState::Recognizing, VadState::SilenceCandidate) => {
-                if self.asr_stream.is_some() {
-                    let samples_vec = samples.to_vec();
-                    self.feed_audio_to_asr_internal(&samples_vec)?;
+            EndpointResult::Timeout => {
+                // 强制超时
+                tracing::warn!("Pipeline: 强制超时");
+                if let Some(stream) = &mut self.asr_stream {
+                    stream.input_finished();
                 }
+                self.pipeline_state = PipelineState::Completed;
+            }
+            EndpointResult::Detected => {
+                // 检测到端点
+                tracing::info!("Pipeline: VAD 端点检测完成");
+                if let Some(stream) = &mut self.asr_stream {
+                    stream.input_finished();
+                }
+                self.pipeline_state = PipelineState::Completed;
+            }
+            EndpointResult::Continue => {
+                // 继续处理，根据 VAD 状态管理 ASR 流
+                match (self.pipeline_state, vad_result.state) {
+                    // 从空闲状态检测到语音开始
+                    (PipelineState::Idle, VadState::Speech) if vad_result.state_changed => {
+                        tracing::info!("Pipeline: Speech detected, starting ASR");
 
-                // 检查是否超过最大静音时间
-                if let Some(last_time) = self.last_speech_time {
-                    let silence_duration = now.duration_since(last_time);
-                    if silence_duration.as_millis() as u64 > self.config.max_silence_duration_ms {
-                        tracing::warn!(
-                            "Pipeline: Max silence duration exceeded ({:?}), finalizing",
-                            silence_duration
-                        );
+                        // 创建新的 ASR 流
+                        let mut stream = self.asr_recognizer.create_stream()?;
 
-                        if let Some(stream) = &mut self.asr_stream {
-                            stream.input_finished();
+                        // 注入 Pre-roll 音频（如果有）
+                        if let Some(pre_roll_audio) = &vad_result.pre_roll_audio {
+                            if !pre_roll_audio.is_empty() {
+                                stream.accept_waveform(
+                                    pre_roll_audio,
+                                    self.config.vad_config.silero.sample_rate as i32,
+                                );
+                                self.asr_frames += 1;
+                                tracing::debug!(
+                                    "Pipeline: Injected {} pre-roll samples",
+                                    pre_roll_audio.len()
+                                );
+                            }
                         }
-                        self.pipeline_state = PipelineState::Completed;
+
+                        let stream_static: OnlineStream<'static> = unsafe {
+                            std::mem::transmute(stream)
+                        };
+                        self.asr_stream = Some(stream_static);
+
+                        self.pipeline_state = PipelineState::Recognizing;
+                        self.speech_start_time = Some(now);
+                    }
+
+                    // 识别中，继续送入音频
+                    (PipelineState::Recognizing, VadState::Speech | VadState::SpeechCandidate | VadState::SilenceCandidate) => {
+                        if self.asr_stream.is_some() {
+                            let samples_vec = samples.to_vec();
+                            self.feed_audio_to_asr_internal(&samples_vec)?;
+                        }
+                    }
+
+                    _ => {
+                        // 其他状态组合，不做处理
                     }
                 }
-            }
-
-            _ => {
-                // 其他状态组合，不做处理
             }
         }
 
-        // 3. 执行 ASR 解码（如果流准备好）
+        // 4. 执行 ASR 解码（如果流准备好）并检查 ASR 端点
         if self.pipeline_state == PipelineState::Recognizing {
             if let Some(stream) = &mut self.asr_stream {
                 if stream.is_ready(&self.asr_recognizer) {
                     stream.decode(&self.asr_recognizer);
                 }
 
-                // 检查端点检测
-                if self.config.enable_endpoint_detection && stream.is_endpoint(&self.asr_recognizer) {
-                    tracing::info!("Pipeline: Endpoint detected by ASR");
+                // 使用 EndpointDetector 检查 ASR 端点
+                let asr_endpoint = stream.is_endpoint(&self.asr_recognizer);
+                let asr_result = self.endpoint_detector.process_asr_endpoint(asr_endpoint);
+
+                if asr_result == EndpointResult::Detected {
+                    tracing::info!("Pipeline: ASR 端点检测完成");
                     stream.input_finished();
                     self.pipeline_state = PipelineState::Completed;
                 }
             }
         }
 
-        // 4. 获取识别结果
+        // 5. 获取识别结果
         let partial_result = if let Some(stream) = &self.asr_stream {
             stream.get_result(&self.asr_recognizer)
         } else {
@@ -289,11 +285,12 @@ impl StreamingPipeline {
         // 重置标点引擎
         self.punctuation_engine.reset_sentence();
 
+        // 重置端点检测器
+        self.endpoint_detector.reset();
+
         // 重置状态
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
-        self.last_speech_time = None;
-        self.vad_silence_ms = 0;
 
         Ok(())
     }
@@ -362,15 +359,17 @@ impl StreamingPipeline {
                 }
 
                 // 检测 VAD 能量变化（用于问号检测）
-                // TODO: 实现真实的能量检测，目前暂时用 false
-                let energy_rising = false;
+                let energy_rising = self.endpoint_detector.analyze_energy_trend();
 
-                tracing::debug!("🔚 准备添加句尾标点: vad_silence_ms={}, energy_rising={}",
-                    self.vad_silence_ms, energy_rising);
+                // 获取语音持续时间用于标点决策
+                let speech_duration_ms = self.endpoint_detector.speech_duration().as_millis() as u64;
+
+                tracing::debug!("🔚 准备添加句尾标点: speech_duration_ms={}, energy_rising={}",
+                    speech_duration_ms, energy_rising);
 
                 // 添加句尾标点
                 let ending = self.punctuation_engine.finalize_sentence(
-                    self.vad_silence_ms,
+                    speech_duration_ms,
                     energy_rising,
                 );
 
@@ -431,13 +430,6 @@ pub struct PipelineStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_streaming_config_default() {
-        let config = StreamingConfig::default();
-        assert_eq!(config.max_silence_duration_ms, 3000);
-        assert!(config.enable_endpoint_detection);
-    }
 
     #[test]
     fn test_pipeline_state_transitions() {

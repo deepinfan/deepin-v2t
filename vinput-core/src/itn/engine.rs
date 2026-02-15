@@ -7,8 +7,8 @@ use std::ops::Range;
 use crate::itn::{
     Block, BlockType, ChineseNumberConverter, EnglishNumberParser, Tokenizer,
 };
-use crate::itn::guards::{ColloquialGuard, ContextGuard};
-use crate::itn::rules::{CurrencyRule, DateRule, PercentageRule, UnitRule};
+use crate::itn::guards::{ChineseWordGuard, ContextGuard};
+use crate::itn::rules::{DateRule, PercentageRule, UnitRule};
 
 /// ITN 模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,21 +118,22 @@ impl ITNEngine {
         // 这样即使是混合文本（如 "我有一千块钱"）也能正确转换数字部分
         content = Self::replace_chinese_numbers(&content);
 
-        // Step 4: ColloquialGuard + CurrencyRule - 金额转换
+        // Step 3: 应用货币规则（处理 "数字+块钱/元" 模式）
         if self.mode == ITNMode::Auto {
-            // 注意：现在 content 中的数字已经是阿拉伯数字了（如 "我有1000块钱"）
-            // 所以 CurrencyRule 不应该再在前面加符号，而是应该跳过
-            // 暂时禁用 CurrencyRule，因为它会错误地在整个句子前加 ¥
-            // TODO: 重新设计 CurrencyRule 来处理已转换的数字
+            content = Self::apply_currency_rules(&content);
+        }
 
-            // Step 5: PercentageRule - 百分比转换
+        // Step 4: PercentageRule - 百分比转换
+        if self.mode == ITNMode::Auto {
             if content.starts_with("百分之") {
                 if let Ok(converted) = PercentageRule::convert_chinese(&content) {
                     content = converted;
                 }
             }
+        }
 
-            // Step 6: DateRule - 日期转换
+        // Step 5: DateRule - 日期转换
+        if self.mode == ITNMode::Auto {
             if DateRule::is_date_expression(&content) {
                 if let Ok(converted) = DateRule::convert_chinese(&content) {
                     content = converted;
@@ -145,6 +146,39 @@ impl ITNEngine {
             block_type: block.block_type,
             span: block.span.clone(),
         }
+    }
+
+    /// 应用货币规则（处理已转换的数字）
+    fn apply_currency_rules(text: &str) -> String {
+        let mut result = text.to_string();
+
+        // 处理 "数字+块钱/块/元" 模式
+        // 注意：此时数字已经是阿拉伯数字了（如 "300块钱"）
+        const PATTERNS: &[(&str, &str)] = &[
+            ("块钱", "¥"),
+            ("块", "¥"),
+            ("元", "¥"),
+            ("人民币", "¥"),
+            ("美元", "$"),
+            ("美金", "$"),
+            ("刀", "$"),
+            ("欧元", "€"),
+            ("英镑", "£"),
+        ];
+
+        for (keyword, symbol) in PATTERNS {
+            // 匹配 "数字+关键词" 模式
+            // 例如: "300块钱" -> "¥300"
+            let pattern_str = format!(r"(\d+(?:\.\d+)?){}", regex::escape(keyword));
+            if let Ok(re) = regex::Regex::new(&pattern_str) {
+                result = re.replace_all(&result, |caps: &regex::Captures<'_>| {
+                    let number = &caps[1];
+                    format!("{}{}", symbol, number)
+                }).to_string();
+            }
+        }
+
+        result
     }
 
     /// 替换文本中的所有中文数字序列
@@ -165,7 +199,38 @@ impl ITNEngine {
                 // 提取中文数字序列
                 let number_text: String = chars[start..i].iter().collect();
 
-                // 尝试转换
+                // ✅ 守卫检查 0：检查前文是否有特殊前缀（如 "百分之"、"第"）
+                // 如果有，应该由专门的规则处理，跳过数字转换
+                let has_special_prefix = start >= 3 && {
+                    let prefix: String = chars[(start.saturating_sub(3))..start].iter().collect();
+                    prefix == "百分之" || prefix == "第" || prefix.ends_with("第")
+                };
+
+                if has_special_prefix {
+                    result.push_str(&number_text);
+                    continue;
+                }
+
+                // ✅ 守卫检查 1：检查是否为完整的常用词（如 "这些"、"那些"）
+                if ChineseWordGuard::should_skip_conversion(&number_text) {
+                    result.push_str(&number_text);
+                    continue;
+                }
+
+                // ✅ 守卫检查 2：向前看一个字符，检查是否形成常用词（如 "一" + "起" = "一起"）
+                if i < chars.len() {
+                    let next_char = chars[i];
+                    let potential_word: String = format!("{}{}", number_text, next_char);
+
+                    if ChineseWordGuard::should_skip_conversion(&potential_word) {
+                        // 这是常用词，保留原文，并跳过下一个字符
+                        result.push_str(&potential_word);
+                        i += 1;  // 跳过已处理的后缀字符
+                        continue;
+                    }
+                }
+
+                // 尝试转换为数字
                 if let Ok(converted) = ChineseNumberConverter::convert(&number_text) {
                     result.push_str(&converted);
                 } else {
@@ -349,6 +414,53 @@ mod tests {
 
         // NumbersOnly 模式应该转换数字
         assert_eq!(result.text, "1234");
+    }
+
+    #[test]
+    fn test_protected_common_words() {
+        let engine = ITNEngine::new(ITNMode::Auto);
+
+        // 应该保护的常用词（不转换）
+        assert_eq!(engine.process("一起").text, "一起");
+        assert_eq!(engine.process("一些").text, "一些");
+        assert_eq!(engine.process("一般").text, "一般");
+        assert_eq!(engine.process("一下").text, "一下");
+        assert_eq!(engine.process("一样").text, "一样");
+        assert_eq!(engine.process("一直").text, "一直");
+        assert_eq!(engine.process("这些").text, "这些");
+        assert_eq!(engine.process("那些").text, "那些");
+
+        // 应该转换的数字表达
+        assert_eq!(engine.process("一千").text, "1000");
+        assert_eq!(engine.process("二十").text, "20");
+        assert_eq!(engine.process("三百").text, "300");
+        assert_eq!(engine.process("一万").text, "10000");
+    }
+
+    #[test]
+    fn test_mixed_common_words_and_numbers() {
+        let engine = ITNEngine::new(ITNMode::Auto);
+
+        // 句子中混合常用词和数字
+        assert_eq!(
+            engine.process("我们一起去了一千个地方").text,
+            "我们一起去了1000个地方"
+        );
+
+        assert_eq!(
+            engine.process("一般情况下有二十个").text,
+            "一般情况下有20个"
+        );
+
+        assert_eq!(
+            engine.process("一下子就来了三百人").text,
+            "一下子就来了300人"
+        );
+
+        assert_eq!(
+            engine.process("这些东西一共五十块").text,
+            "这些东西一共¥50"  // 货币规则：块 → ¥
+        );
     }
 }
 

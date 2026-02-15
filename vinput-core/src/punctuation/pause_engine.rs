@@ -3,7 +3,6 @@
 //! 基于 VAD 时间戳和 token 时长检测停顿，判断是否插入逗号
 
 use crate::punctuation::config::StyleProfile;
-use std::time::Duration;
 
 /// Token 信息
 #[derive(Debug, Clone)]
@@ -32,6 +31,17 @@ impl TokenInfo {
     }
 }
 
+/// Token 处理结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenAction {
+    /// 跳过此 token（时长过短）
+    Skip,
+    /// 正常添加 token
+    Normal,
+    /// 在 token 前插入逗号
+    InsertComma,
+}
+
 /// 停顿检测引擎
 pub struct PauseEngine {
     profile: StyleProfile,
@@ -51,8 +61,16 @@ impl PauseEngine {
 
     /// 添加新 token
     ///
-    /// 返回是否应该在此 token 前插入逗号
-    pub fn add_token(&mut self, token: TokenInfo) -> bool {
+    /// 返回 Token 处理动作
+    pub fn add_token(&mut self, token: TokenInfo) -> TokenAction {
+        // ✅ 检查 token 内容，过滤空白字符和无意义字符
+        let trimmed = token.text.trim();
+        if trimmed.is_empty() || trimmed == " " || trimmed == "NE" {
+            tracing::debug!("    ⏭  Token '{}' 是空白或无意义字符，跳过", token.text);
+            // 不添加到历史，直接跳过
+            return TokenAction::Skip;
+        }
+
         let should_insert = self.should_insert_comma(&token);
 
         if should_insert {
@@ -61,7 +79,12 @@ impl PauseEngine {
         }
 
         self.token_history.push(token);
-        should_insert
+
+        if should_insert {
+            TokenAction::InsertComma
+        } else {
+            TokenAction::Normal
+        }
     }
 
     /// 判断是否应该插入逗号
@@ -85,9 +108,9 @@ impl PauseEngine {
         if let Some(last_token) = self.token_history.last() {
             let last_token_duration = last_token.duration_ms();
 
-            // 检查最小时长（避免误判短 Token）
+            // ✅ 检查最小时长（避免误判短 Token 包含停顿）
             if last_token_duration < self.profile.min_pause_duration_ms {
-                tracing::debug!("    ⏭  上一Token '{}' 时长 {}ms < 最小阈值 {}ms，跳过",
+                tracing::debug!("    ⏭  上一Token '{}' 时长 {}ms < 最小停顿阈值 {}ms，不检测停顿",
                     last_token.text, last_token_duration, self.profile.min_pause_duration_ms);
                 return false;
             }
@@ -153,24 +176,26 @@ mod tests {
 
     #[test]
     fn test_pause_engine_basic() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加第一个 token - 不应插入逗号（token 数不足）
-        assert!(!engine.add_token(TokenInfo::new("你好".to_string(), 0, 200)));
+        let action = engine.add_token(TokenInfo::new("你好".to_string(), 0, 600));
+        assert_eq!(action, TokenAction::Normal);
     }
 
     #[test]
     fn test_pause_engine_min_tokens() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加 5 个 token（小于 min_tokens: 6）
         for i in 0..5 {
             let token = TokenInfo::new(
                 format!("token{}", i),
                 i * 200,
-                i * 200 + 180,
+                i * 700 + 600,
             );
-            assert!(!engine.add_token(token));
+            let action = engine.add_token(token);
+            assert_eq!(action, TokenAction::Normal);
         }
 
         assert_eq!(engine.token_count(), 5);
@@ -178,56 +203,80 @@ mod tests {
 
     #[test]
     fn test_pause_engine_with_pause() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
-        // 添加 6 个正常 token
-        for i in 0..6 {
+        // 添加 5 个正常 token（时长 600ms）
+        for i in 0..5 {
             let token = TokenInfo::new(
                 format!("token{}", i),
-                i * 200,
-                i * 200 + 180,
+                i * 700,
+                i * 700 + 600,
             );
-            assert!(!engine.add_token(token));
+            engine.add_token(token);
         }
 
-        // 添加一个带长停顿的 token
-        // 上一个 token 结束于 1180ms
-        // 这个 token 开始于 2000ms，停顿 820ms
-        // 平均 token 时长约 180ms，停顿比例 = 820/180 ≈ 4.5 > 3.5
-        let paused_token = TokenInfo::new(
-            "next".to_string(),
-            2000,
-            2180,
+        // 添加第 6 个 token，时长异常长（包含停顿）
+        // 正常 600ms + 停顿 1700ms = 2300ms
+        let long_token = TokenInfo::new(
+            "token5".to_string(),
+            3500,  // 5 * 700
+            5800,  // 3500 + 2300
         );
-        assert!(engine.add_token(paused_token));
+        engine.add_token(long_token);
+
+        // 添加下一个 token
+        // 因为上一个 token 时长 2300ms，远超平均 600ms
+        // 比例 = 2300 / 600 ≈ 3.83 > 3.5，应该插入逗号
+        let next_token = TokenInfo::new(
+            "next".to_string(),
+            5800,
+            6400,
+        );
+        let action = engine.add_token(next_token);
+        assert_eq!(action, TokenAction::InsertComma);
+    }
+
+    #[test]
+    fn test_pause_engine_skip_short_token() {
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
+
+        // min_pause_duration_ms = 500ms
+        // 添加一个时长 < 500ms 的 token，应该被跳过
+        let short_token = TokenInfo::new(" ".to_string(), 0, 41);
+        let action = engine.add_token(short_token);
+        assert_eq!(action, TokenAction::Skip);
+
+        // 验证没有添加到历史
+        assert_eq!(engine.token_count(), 0);
     }
 
     #[test]
     fn test_pause_engine_min_tokens_between_commas() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
         // 添加 6 个 token
         for i in 0..6 {
             engine.add_token(TokenInfo::new(
                 format!("token{}", i),
                 i * 200,
-                i * 200 + 180,
+                i * 700 + 600,
             ));
         }
 
         // 触发第一个逗号
-        engine.add_token(TokenInfo::new("next".to_string(), 2000, 2180));
+        engine.add_token(TokenInfo::new("next".to_string(), 5000, 5600));
 
         // 立即尝试触发第二个逗号（但 tokens_since_comma < 4）
-        let token2 = TokenInfo::new("another".to_string(), 3000, 3180);
-        assert!(!engine.add_token(token2));
+        let token2 = TokenInfo::new("another".to_string(), 7000, 7600);
+        let action = engine.add_token(token2);
+        assert_eq!(action, TokenAction::Normal);
     }
 
     #[test]
     fn test_pause_engine_reset() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
-        engine.add_token(TokenInfo::new("test".to_string(), 0, 200));
+        engine.add_token(TokenInfo::new("test".to_string(), 0, 600));
         assert_eq!(engine.token_count(), 1);
 
         engine.reset();
@@ -236,15 +285,15 @@ mod tests {
 
     #[test]
     fn test_calculate_avg_duration() {
-        let mut engine = PauseEngine::new(StyleProfile::professional());
+        let mut engine = PauseEngine::new(StyleProfile::from_preset("Professional"));
 
-        // 添加 3 个 token，时长分别为 100ms, 200ms, 300ms
-        engine.add_token(TokenInfo::new("t1".to_string(), 0, 100));
-        engine.add_token(TokenInfo::new("t2".to_string(), 100, 300));
-        engine.add_token(TokenInfo::new("t3".to_string(), 300, 600));
+        // 添加 3 个 token，时长分别为 600ms, 700ms, 800ms（都 >= 500ms 不会被跳过）
+        engine.add_token(TokenInfo::new("t1".to_string(), 0, 600));
+        engine.add_token(TokenInfo::new("t2".to_string(), 600, 1300));
+        engine.add_token(TokenInfo::new("t3".to_string(), 1300, 2100));
 
         let avg = engine.calculate_avg_token_duration();
-        assert_eq!(avg, (100 + 200 + 300) / 3); // 200ms
+        assert_eq!(avg, (600 + 700 + 800) / 3); // 700ms
     }
 
     #[test]
