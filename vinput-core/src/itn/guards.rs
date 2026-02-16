@@ -137,6 +137,7 @@ impl ChineseWordGuard {
         "一边", "一共", "一旦", "一致", "一刻", "一切", "一向",
         "一律", "一再", "一度", "一时", "一概", "一并", "一贯",
         "一如", "一经", "一味", "一身", "一番", "一帆", "一路",
+        "一开始", "一会儿", "一瞬间", "一辈子", "一方面",
         // 指示词
         "这些", "那些", "哪些", "某些",
         // 其他常用词
@@ -273,6 +274,9 @@ mod tests {
         assert!(ChineseWordGuard::should_skip_conversion("一般"));
         assert!(ChineseWordGuard::should_skip_conversion("一下"));
         assert!(ChineseWordGuard::should_skip_conversion("一样"));
+        assert!(ChineseWordGuard::should_skip_conversion("一开始"));
+        assert!(ChineseWordGuard::should_skip_conversion("一会儿"));
+        assert!(ChineseWordGuard::should_skip_conversion("一瞬间"));
         assert!(ChineseWordGuard::should_skip_conversion("这些"));
         assert!(ChineseWordGuard::should_skip_conversion("那些"));
 

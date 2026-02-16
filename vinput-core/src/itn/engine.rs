@@ -217,17 +217,26 @@ impl ITNEngine {
                     continue;
                 }
 
-                // ✅ 守卫检查 2：向前看一个字符，检查是否形成常用词（如 "一" + "起" = "一起"）
-                if i < chars.len() {
-                    let next_char = chars[i];
-                    let potential_word: String = format!("{}{}", number_text, next_char);
+                // ✅ 守卫检查 2：向前看最多3个字符，检查是否形成常用词
+                // 例如："一" + "开始" = "一开始"，"一" + "会儿" = "一会儿"
+                let mut found_protected_word = false;
+                for lookahead in 1..=3 {
+                    if i + lookahead <= chars.len() {
+                        let next_chars: String = chars[i..(i + lookahead)].iter().collect();
+                        let potential_word = format!("{}{}", number_text, next_chars);
 
-                    if ChineseWordGuard::should_skip_conversion(&potential_word) {
-                        // 这是常用词，保留原文，并跳过下一个字符
-                        result.push_str(&potential_word);
-                        i += 1;  // 跳过已处理的后缀字符
-                        continue;
+                        if ChineseWordGuard::should_skip_conversion(&potential_word) {
+                            // 这是常用词，保留原文，并跳过已处理的字符
+                            result.push_str(&potential_word);
+                            i += lookahead;  // 跳过已处理的字符
+                            found_protected_word = true;
+                            break;
+                        }
                     }
+                }
+
+                if found_protected_word {
+                    continue;
                 }
 
                 // 尝试转换为数字

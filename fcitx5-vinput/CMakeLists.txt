@@ -37,9 +37,10 @@ set_target_properties(vinput PROPERTIES
 )
 
 # 安装
-install(TARGETS vinput DESTINATION ${CMAKE_INSTALL_LIBDIR}/fcitx5)
-install(FILES vinput.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/inputmethod)
-install(FILES vinput-addon.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/fcitx5/addon)
+# 强制安装到系统路径，避免 /usr/local 导致的重复
+install(TARGETS vinput DESTINATION /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}/fcitx5)
+install(FILES vinput.conf DESTINATION /usr/share/fcitx5/inputmethod RENAME vinput-im.conf)
+install(FILES vinput-addon.conf DESTINATION /usr/share/fcitx5/addon RENAME vinput.conf)
 
 # 安装 Rust 核心库
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../target/release/libvinput_core.so

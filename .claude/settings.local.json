@@ -41,7 +41,8 @@
       "Bash(sudo make install:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(cbindgen:*)"
+      "Bash(cbindgen:*)",
+      "Bash(cmake:*)"
     ]
   }
 }
