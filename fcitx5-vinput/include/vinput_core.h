@@ -13,70 +13,6 @@
 #include <stdlib.h>
 
 /**
- * V-Input 命令类型
- */
-typedef enum VInputVInputCommandType {
-  /**
-   * 提交文本
-   */
-  CommitText = 1,
-  /**
-   * 显示候选
-   */
-  ShowCandidate = 2,
-  /**
-   * 隐藏候选
-   */
-  HideCandidate = 3,
-  /**
-   * 错误消息
-   */
-  Error = 4,
-  /**
-   * 撤销文本
-   */
-  UndoText = 5,
-  /**
-   * 重试文本
-   */
-  RedoText = 6,
-} VInputVInputCommandType;
-
-/**
- * V-Input 事件类型
- */
-typedef enum VInputVInputEventType {
-  /**
-   * 开始录音
-   */
-  StartRecording = 1,
-  /**
-   * 停止录音
-   */
-  StopRecording = 2,
-  /**
-   * 音频数据
-   */
-  AudioData = 3,
-  /**
-   * 识别结果
-   */
-  RecognitionResult = 4,
-  /**
-   * VAD 状态变化
-   */
-  VADStateChanged = 5,
-  /**
-   * 撤销请求
-   */
-  UndoRequest = 6,
-  /**
-   * 重试请求
-   */
-  RedoRequest = 7,
-} VInputVInputEventType;
-
-/**
  * FFI 结果码
  */
 typedef enum VInputVInputFFIResult {
@@ -113,6 +49,78 @@ typedef enum VInputVInputFFIResult {
    */
   AudioError = -7,
 } VInputVInputFFIResult;
+
+/**
+ * V-Input 命令类型
+ */
+typedef enum VInputVInputCommandType {
+  /**
+   * 提交文本
+   */
+  CommitText = 1,
+  /**
+   * 显示候选
+   */
+  ShowCandidate = 2,
+  /**
+   * 隐藏候选
+   */
+  HideCandidate = 3,
+  /**
+   * 错误消息
+   */
+  Error = 4,
+  /**
+   * 撤销文本
+   */
+  UndoText = 5,
+  /**
+   * 重试文本
+   */
+  RedoText = 6,
+  /**
+   * 更新 Preedit
+   */
+  UpdatePreedit = 7,
+  /**
+   * 清除 Preedit
+   */
+  ClearPreedit = 8,
+} VInputVInputCommandType;
+
+/**
+ * V-Input 事件类型
+ */
+typedef enum VInputVInputEventType {
+  /**
+   * 开始录音
+   */
+  StartRecording = 1,
+  /**
+   * 停止录音
+   */
+  StopRecording = 2,
+  /**
+   * 音频数据
+   */
+  AudioData = 3,
+  /**
+   * 识别结果
+   */
+  RecognitionResult = 4,
+  /**
+   * VAD 状态变化
+   */
+  VADStateChanged = 5,
+  /**
+   * 撤销请求
+   */
+  UndoRequest = 6,
+  /**
+   * 重试请求
+   */
+  RedoRequest = 7,
+} VInputVInputEventType;
 
 /**
  * V-Input 命令（从 Rust Core -> Fcitx5）

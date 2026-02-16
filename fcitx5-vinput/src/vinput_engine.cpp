@@ -255,6 +255,28 @@ void VInputEngine::handleCommand(const VInputVInputCommand* command) {
             }
             break;
 
+        case VInputVInputCommandType::UpdatePreedit:
+            FCITX_DEBUG() << "UpdatePreedit: " << text;
+            // 更新 Preedit 显示
+            {
+                Text preedit(text);
+                preedit.setCursor(text.length());
+                auto& inputPanel = ic->inputPanel();
+                inputPanel.setClientPreedit(preedit);
+                ic->updatePreedit();
+            }
+            break;
+
+        case VInputVInputCommandType::ClearPreedit:
+            FCITX_DEBUG() << "ClearPreedit";
+            // 清除 Preedit
+            {
+                auto& inputPanel = ic->inputPanel();
+                inputPanel.reset();
+                ic->updatePreedit();
+            }
+            break;
+
         default:
             FCITX_WARN() << "Unknown command type: "
                         << static_cast<int>(command->command_type);

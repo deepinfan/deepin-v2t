@@ -40,7 +40,8 @@
       "Bash(./integration-test.sh:*)",
       "Bash(sudo make install:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cbindgen:*)"
     ]
   }
 }

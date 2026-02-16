@@ -49,6 +49,12 @@ pub enum PipelineState {
 pub struct StreamingResult {
     /// 当前识别的部分结果（实时更新）
     pub partial_result: String,
+    /// 稳定的文本（可以立即上屏）
+    pub stable_text: String,
+    /// 不稳定的文本（保留在 Preedit）
+    pub unstable_text: String,
+    /// 是否应该添加逗号（检测到停顿）
+    pub should_add_comma: bool,
     /// 是否为最终结果
     pub is_final: bool,
     /// VAD 状态
@@ -248,8 +254,17 @@ impl StreamingPipeline {
             .map(|start| now.duration_since(start).as_millis() as u64)
             .unwrap_or(0);
 
+        // 6. 分离稳定和不稳定文本
+        let (stable_text, unstable_text) = self.split_stable_unstable(&partial_result);
+
+        // 7. 检测是否应该添加逗号（停顿检测）
+        let should_add_comma = false; // TODO: 实现停顿检测逻辑
+
         Ok(StreamingResult {
             partial_result,
+            stable_text,
+            unstable_text,
+            should_add_comma,
             is_final,
             vad_state: vad_result.state,
             pipeline_state: self.pipeline_state,
@@ -319,6 +334,26 @@ impl StreamingPipeline {
                 .map(|start| Instant::now().duration_since(start).as_millis() as u64)
                 .unwrap_or(0),
         }
+    }
+
+    /// 分离稳定和不稳定文本
+    ///
+    /// 保留最后 N 个字符在 Preedit（不稳定），其余部分可以立即上屏（稳定）
+    fn split_stable_unstable(&self, text: &str) -> (String, String) {
+        const KEEP_LAST_CHARS: usize = 2; // 保留最后2个字符在 Preedit
+
+        let chars: Vec<char> = text.chars().collect();
+
+        if chars.len() <= KEEP_LAST_CHARS {
+            // 全部不稳定
+            return (String::new(), text.to_string());
+        }
+
+        let stable_count = chars.len() - KEEP_LAST_CHARS;
+        let stable: String = chars[..stable_count].iter().collect();
+        let unstable: String = chars[stable_count..].iter().collect();
+
+        (stable, unstable)
     }
 
     /// 获取最终识别结果（带标点）

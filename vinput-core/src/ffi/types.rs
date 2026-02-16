@@ -71,6 +71,10 @@ pub enum VInputCommandType {
     UndoText = 5,
     /// 重试文本
     RedoText = 6,
+    /// 更新 Preedit
+    UpdatePreedit = 7,
+    /// 清除 Preedit
+    ClearPreedit = 8,
 }
 
 /// V-Input 命令（从 Rust Core -> Fcitx5）
@@ -196,6 +200,26 @@ impl VInputCommand {
             command_type: VInputCommandType::RedoText,
             text: c_text.into_raw(),
             text_len: text.len(),
+        }
+    }
+
+    /// 创建更新 Preedit 命令
+    pub fn update_preedit(text: &str) -> Self {
+        use std::ffi::CString;
+        let c_text = CString::new(text).unwrap();
+        Self {
+            command_type: VInputCommandType::UpdatePreedit,
+            text: c_text.into_raw(),
+            text_len: text.len(),
+        }
+    }
+
+    /// 创建清除 Preedit 命令
+    pub fn clear_preedit() -> Self {
+        Self {
+            command_type: VInputCommandType::ClearPreedit,
+            text: std::ptr::null_mut(),
+            text_len: 0,
         }
     }
 }

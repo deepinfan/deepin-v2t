@@ -173,6 +173,9 @@ impl VInputCoreState {
         const FRAME_SIZE: usize = 512;
         let mut frame_buffer = vec![0.0f32; FRAME_SIZE];
 
+        // 混合模式状态：记录已上屏的稳定文本
+        let mut last_committed_stable = String::new();
+
         loop {
             // 检查停止信号
             if *stop_signal.lock().unwrap() {
@@ -204,10 +207,54 @@ impl VInputCoreState {
                             tracing::debug!("识别中: {}", result.partial_result);
                         }
 
-                        // 🎯 检测到句子结束（端点检测）
+                        // 🎯 混合模式：流式上屏稳定文本
                         use crate::streaming::PipelineState;
+                        if result.pipeline_state == PipelineState::Recognizing {
+                            // 计算新增的稳定文本
+                            if result.stable_text.len() > last_committed_stable.len() {
+                                let new_stable = &result.stable_text[last_committed_stable.len()..];
+
+                                if !new_stable.is_empty() {
+                                    tracing::debug!("📝 上屏稳定文本: [{}]", new_stable);
+
+                                    // 立即上屏新增的稳定文本
+                                    if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                        let cmd = VInputCommand::commit_text(new_stable);
+                                        callback(&cmd as *const VInputCommand);
+                                        vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                                    }
+
+                                    last_committed_stable = result.stable_text.clone();
+                                }
+                            }
+
+                            // 更新 Preedit 显示不稳定文本
+                            if !result.unstable_text.is_empty() {
+                                if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                    let cmd = VInputCommand::update_preedit(&result.unstable_text);
+                                    callback(&cmd as *const VInputCommand);
+                                    vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                                }
+                            } else {
+                                // 清除 Preedit（如果不稳定文本为空）
+                                if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                    let cmd = VInputCommand::clear_preedit();
+                                    callback(&cmd as *const VInputCommand);
+                                    vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                                }
+                            }
+                        }
+
+                        // 🎯 检测到句子结束（端点检测）
                         if result.pipeline_state == PipelineState::Completed {
-                            tracing::info!("🔔 检测到句子结束，自动提交结果");
+                            tracing::info!("🔔 检测到句子结束，处理最终结果");
+
+                            // 清除 Preedit
+                            if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                let cmd = VInputCommand::clear_preedit();
+                                callback(&cmd as *const VInputCommand);
+                                vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                            }
 
                             // 获取带标点的最终结果
                             let raw_result_with_punct = pipe.get_final_result_with_punctuation();
@@ -236,34 +283,35 @@ impl VInputCoreState {
 
                                 tracing::info!("✅ 最终结果: [{}]", final_result);
 
+                                // 计算剩余未上屏的文本
+                                let remaining_text = if final_result.len() > last_committed_stable.len() {
+                                    &final_result[last_committed_stable.len()..]
+                                } else {
+                                    ""
+                                };
+
+                                if !remaining_text.is_empty() {
+                                    tracing::info!("📝 上屏剩余文本: [{}]", remaining_text);
+
+                                    // 上屏剩余文本
+                                    if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                        let cmd = VInputCommand::commit_text(remaining_text);
+                                        callback(&cmd as *const VInputCommand);
+                                        vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                                    }
+                                }
+
                                 // 记录到历史
                                 if let Ok(mut history) = recognition_history.lock() {
                                     history.push(final_result.clone());
                                     tracing::debug!("已记录到历史，当前历史数: {}", history.len());
                                 }
 
-                                // 🎯 直接调用回调函数（零延迟！）
-                                if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
-                                    tracing::info!("📞 调用 C++ 回调函数");
-
-                                    // 生成命令并直接回调
-                                    let cmd1 = VInputCommand::show_candidate(&final_result);
-                                    callback(&cmd1 as *const VInputCommand);
-                                    vinput_command_free(&cmd1 as *const VInputCommand as *mut VInputCommand);
-
-                                    let cmd2 = VInputCommand::commit_text(&final_result);
-                                    callback(&cmd2 as *const VInputCommand);
-                                    vinput_command_free(&cmd2 as *const VInputCommand as *mut VInputCommand);
-
-                                    let cmd3 = VInputCommand::hide_candidate();
-                                    callback(&cmd3 as *const VInputCommand);
-                                    vinput_command_free(&cmd3 as *const VInputCommand as *mut VInputCommand);
-
-                                    tracing::info!("✨ 已通过回调发送 3 个命令（零延迟上屏）");
-                                } else {
-                                    tracing::warn!("⚠️  回调未注册，无法自动上屏");
-                                }
+                                tracing::info!("✨ 混合模式上屏完成");
                             }
+
+                            // 重置状态
+                            last_committed_stable.clear();
 
                             // 重置 Pipeline 准备下一句
                             let _ = pipe.reset();
