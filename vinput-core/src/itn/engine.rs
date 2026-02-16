@@ -114,28 +114,29 @@ impl ITNEngine {
     fn process_chinese_block(&self, block: &Block) -> Block {
         let mut content = block.content.clone();
 
-        // Step 2: 先替换所有中文数字序列
-        // 这样即使是混合文本（如 "我有一千块钱"）也能正确转换数字部分
-        content = Self::replace_chinese_numbers(&content);
-
-        // Step 3: 应用货币规则（处理 "数字+块钱/元" 模式）
+        // Step 2: DateRule - 日期转换（必须在数字转换之前！）
+        // 因为年份需要逐位转换，不能被 replace_chinese_numbers 处理
         if self.mode == ITNMode::Auto {
-            content = Self::apply_currency_rules(&content);
-        }
-
-        // Step 4: PercentageRule - 百分比转换
-        if self.mode == ITNMode::Auto {
-            if content.starts_with("百分之") {
-                if let Ok(converted) = PercentageRule::convert_chinese(&content) {
+            if DateRule::is_date_expression(&content) {
+                if let Ok(converted) = DateRule::convert_chinese(&content) {
                     content = converted;
                 }
             }
         }
 
-        // Step 5: DateRule - 日期转换
+        // Step 3: 替换所有中文数字序列
+        // 这样即使是混合文本（如 "我有一千块钱"）也能正确转换数字部分
+        content = Self::replace_chinese_numbers(&content);
+
+        // Step 4: 应用货币规则（处理 "数字+块钱/元" 模式）
         if self.mode == ITNMode::Auto {
-            if DateRule::is_date_expression(&content) {
-                if let Ok(converted) = DateRule::convert_chinese(&content) {
+            content = Self::apply_currency_rules(&content);
+        }
+
+        // Step 5: PercentageRule - 百分比转换
+        if self.mode == ITNMode::Auto {
+            if content.starts_with("百分之") {
+                if let Ok(converted) = PercentageRule::convert_chinese(&content) {
                     content = converted;
                 }
             }
@@ -217,6 +218,15 @@ impl ITNEngine {
                     continue;
                 }
 
+                // ✅ 守卫检查 1.5：检查是否为年份格式（4个基础数字，如 "二零二六"）
+                // 这种格式应该逐位转换，不应该按数值计算
+                if Self::is_year_format(&number_text) {
+                    // 逐位转换
+                    let year_digits = Self::convert_year_digits(&number_text);
+                    result.push_str(&year_digits);
+                    continue;
+                }
+
                 // ✅ 守卫检查 2：向前看最多3个字符，检查是否形成常用词
                 // 例如："一" + "开始" = "一开始"，"一" + "会儿" = "一会儿"
                 let mut found_protected_word = false;
@@ -259,6 +269,36 @@ impl ITNEngine {
     /// 检查是否为中文数字字符
     fn is_chinese_number_char(ch: char) -> bool {
         matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿'|'点'|'负')
+    }
+
+    /// 检查是否为年份格式（4个基础数字，如 "二零二六"）
+    fn is_year_format(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() != 4 {
+            return false;
+        }
+
+        // 所有字符都是基础数字（0-9）
+        chars.iter().all(|&ch| matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'))
+    }
+
+    /// 转换年份数字（逐位转换，用于 "二零二六" 格式）
+    fn convert_year_digits(text: &str) -> String {
+        text.chars()
+            .filter_map(|ch| match ch {
+                '零' => Some('0'),
+                '一' => Some('1'),
+                '二' => Some('2'),
+                '三' => Some('3'),
+                '四' => Some('4'),
+                '五' => Some('5'),
+                '六' => Some('6'),
+                '七' => Some('7'),
+                '八' => Some('8'),
+                '九' => Some('9'),
+                _ => None,
+            })
+            .collect()
     }
 
     /// 处理英文 Block

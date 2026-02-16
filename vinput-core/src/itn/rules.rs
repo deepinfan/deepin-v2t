@@ -145,16 +145,24 @@ impl DateRule {
     }
 
     /// 转换日期组件（年/月/日）
+    /// 处理所有出现的分隔符，从右到左处理以避免索引问题
     fn convert_date_component(text: &str, delimiter: char, is_year: bool) -> String {
         use crate::itn::ChineseNumberConverter;
 
-        // 查找分隔符位置
-        if let Some(delim_pos) = text.find(delimiter) {
-            // 向前收集中文数字字符
-            let chars: Vec<char> = text.chars().collect();
-            let delim_idx = text.char_indices()
-                .position(|(_, c)| c == delimiter)
-                .unwrap();
+        let mut result = text.to_string();
+
+        // 从右到左查找所有分隔符，避免索引变化问题
+        loop {
+            let chars: Vec<char> = result.chars().collect();
+
+            // 查找最后一个分隔符
+            let delim_idx = chars.iter().rposition(|&c| c == delimiter);
+
+            if delim_idx.is_none() {
+                break;
+            }
+
+            let delim_idx = delim_idx.unwrap();
 
             // 向前查找连续的中文数字
             let mut start_idx = delim_idx;
@@ -183,11 +191,18 @@ impl DateRule {
                 // 替换
                 let before: String = chars[..start_idx].iter().collect();
                 let after: String = chars[delim_idx..].iter().collect();
-                return format!("{}{}{}", before, converted, after);
+                result = format!("{}{}{}", before, converted, after);
+            } else {
+                // 这个分隔符前面没有数字，标记为已处理
+                // 将这个分隔符临时替换为特殊标记，处理完后再恢复
+                let before: String = chars[..delim_idx].iter().collect();
+                let after: String = chars[(delim_idx + 1)..].iter().collect();
+                result = format!("{}\u{FFFF}{}", before, after);
             }
         }
 
-        text.to_string()
+        // 恢复临时标记
+        result.replace('\u{FFFF}', &delimiter.to_string())
     }
 
     /// 检查是否为中文数字字符
@@ -221,8 +236,13 @@ impl DateRule {
 
     /// 检查是否为日期表达
     pub fn is_date_expression(text: &str) -> bool {
-        (text.contains("年") && text.contains("月"))
+        // 包含年份（如 "二零二六年"）
+        text.contains("年")
+            // 或包含年月（如 "二零二六年三月"）
+            || (text.contains("年") && text.contains("月"))
+            // 或包含年日（如 "二零二六年五日"）
             || (text.contains("年") && (text.contains("日") || text.contains("号")))
+            // 或包含月日（如 "三月五号"）
             || (text.contains("月") && (text.contains("日") || text.contains("号")))
     }
 }
