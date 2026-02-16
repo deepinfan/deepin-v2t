@@ -212,6 +212,18 @@ impl ITNEngine {
                     continue;
                 }
 
+                // ✅ 守卫检查 0.5：检查前面是否有普通汉字（backward checking）
+                // 只对单字符数字序列检查（如 "统一"、"归一"、"真二"）
+                // 多字符数字序列（如 "一千"、"一百"）通常是数量表达，应该转换
+                if number_text.chars().count() == 1 && start > 0 {
+                    let prev_char = chars[start - 1];
+                    // 如果前一个字符是汉字（非数字、非标点、非空格）
+                    if Self::is_ordinary_chinese_char(prev_char) {
+                        result.push_str(&number_text);
+                        continue;
+                    }
+                }
+
                 // ✅ 守卫检查 1：检查是否为完整的常用词（如 "这些"、"那些"）
                 if ChineseWordGuard::should_skip_conversion(&number_text) {
                     result.push_str(&number_text);
@@ -269,6 +281,27 @@ impl ITNEngine {
     /// 检查是否为中文数字字符
     fn is_chinese_number_char(ch: char) -> bool {
         matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿'|'点'|'负')
+    }
+
+    /// 检查是否为普通汉字（非数字、非标点、非空格）
+    fn is_ordinary_chinese_char(ch: char) -> bool {
+        // 排除数字字符
+        if Self::is_chinese_number_char(ch) {
+            return false;
+        }
+
+        // 排除常见标点和符号
+        if matches!(ch, '，' | '。' | '！' | '？' | '、' | '；' | '：' | '"' | '"' | '\'' | '（' | '）' | '【' | '】' | '《' | '》') {
+            return false;
+        }
+
+        // 排除空格和英文字符
+        if ch.is_whitespace() || ch.is_ascii() {
+            return false;
+        }
+
+        // 检查是否为 CJK 统一汉字范围
+        matches!(ch, '\u{4E00}'..='\u{9FFF}')
     }
 
     /// 检查是否为年份格式（4个基础数字，如 "二零二六"）
