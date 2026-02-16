@@ -131,16 +131,13 @@ pub struct ChineseWordGuard;
 
 impl ChineseWordGuard {
     /// 不应转换的常用词白名单
+    ///
+    /// 注意：大部分词已经可以通过智能后缀判断自动识别
+    /// 这个白名单只保留需要特殊处理的词
     const PROTECTED_WORDS: &'static [&'static str] = &[
-        // "一" 字开头的常用词
-        "一起", "一些", "一般", "一下", "一样", "一直", "一定",
-        "一边", "一共", "一旦", "一致", "一刻", "一切", "一向",
-        "一律", "一再", "一度", "一时", "一概", "一并", "一贯",
-        "一如", "一经", "一味", "一身", "一番", "一帆", "一路",
-        "一开始", "一会儿", "一瞬间", "一辈子", "一方面",
         // 指示词
         "这些", "那些", "哪些", "某些",
-        // 其他常用词
+        // 特殊词（第一个字不是基础数字）
         "万一", "统一", "唯一", "单一", "第一",
     ];
 
@@ -150,19 +147,76 @@ impl ChineseWordGuard {
         '起', '些', '般', '下', '样', '直', '定', '边', '共',
         '旦', '致', '刻', '切', '向', '律', '再', '度', '时',
         '概', '并', '贯', '如', '经', '味', '身', '番', '帆', '路',
+        '开', '会', '瞬', '辈', '方',  // 新增：开始、会儿、瞬间、辈子、方面
+    ];
+
+    /// 数字单位（数字字符后跟这些字符应该转换）
+    /// 这些是真正的数字单位或量词
+    const NUMERIC_UNITS: &'static [char] = &[
+        '十', '百', '千', '万', '亿',  // 数字单位
+        '个', '只', '条', '张', '本', '支', '件', '台', '辆', '架',  // 量词
+        '块', '元', '角', '分',  // 货币单位
+        '斤', '两', '克', '吨',  // 重量单位
+        '米', '厘', '里', '尺',  // 长度单位
+        '年', '月', '日', '时', '分', '秒',  // 时间单位（但"时"在 NON_NUMERIC_SUFFIXES 中，需要特殊处理）
     ];
 
     /// 检查是否应该跳过数字转换
     ///
     /// 返回 true 表示应该保留原文，不进行数字转换
     pub fn should_skip_conversion(text: &str) -> bool {
-        // 策略 1: 检查完整词白名单
+        // 策略 1: 检查完整词白名单（保留用于特殊情况）
         if Self::PROTECTED_WORDS.contains(&text) {
             return true;
         }
 
-        // 策略 2: 检查是否为 "数字字符 + 非数字后缀" 模式
-        if Self::is_non_numeric_pattern(text) {
+        // 策略 2: 智能判断 - 检查后缀是否为非数字后缀
+        if Self::has_non_numeric_suffix(text) {
+            return true;
+        }
+
+        false
+    }
+
+    /// 检查是否有非数字后缀（智能判断）
+    ///
+    /// 规则：如果文本以数字字符开头，且紧跟非数字后缀，则不应转换
+    fn has_non_numeric_suffix(text: &str) -> bool {
+        let chars: Vec<char> = text.chars().collect();
+        if chars.is_empty() {
+            return false;
+        }
+
+        // 第一个字符必须是基础数字（不包括十百千万亿）
+        let is_first_basic_digit = matches!(
+            chars[0],
+            '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九'
+        );
+
+        if !is_first_basic_digit {
+            return false;
+        }
+
+        // 检查第二个字符
+        if chars.len() >= 2 {
+            let second_char = chars[1];
+
+            // 如果第二个字符是数字单位，应该转换
+            if Self::NUMERIC_UNITS.contains(&second_char) {
+                return false;
+            }
+
+            // 如果第二个字符是非数字后缀，不应该转换
+            if Self::NON_NUMERIC_SUFFIXES.contains(&second_char) {
+                return true;
+            }
+
+            // 如果第二个字符也是数字字符，继续检查（如 "一千"）
+            if matches!(second_char, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿') {
+                return false;  // 这是数字表达，应该转换
+            }
+
+            // 其他情况：第二个字符是普通汉字，可能是词组，不转换
             return true;
         }
 
@@ -171,23 +225,10 @@ impl ChineseWordGuard {
 
     /// 检查是否为非数字模式（如 "一起"、"二般"）
     ///
-    /// 规则：两个字符，第一个是数字字符，第二个是非数字后缀
+    /// 已废弃：使用 has_non_numeric_suffix 代替
+    #[deprecated(note = "Use has_non_numeric_suffix instead")]
     fn is_non_numeric_pattern(text: &str) -> bool {
-        let chars: Vec<char> = text.chars().collect();
-        if chars.len() != 2 {
-            return false;
-        }
-
-        // 第一个字符是中文数字字符
-        let is_first_digit = matches!(
-            chars[0],
-            '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九'
-        );
-
-        // 第二个字符是非数字后缀
-        let is_second_suffix = Self::NON_NUMERIC_SUFFIXES.contains(&chars[1]);
-
-        is_first_digit && is_second_suffix
+        Self::has_non_numeric_suffix(text)
     }
 }
 
