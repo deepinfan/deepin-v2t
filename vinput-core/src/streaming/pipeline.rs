@@ -339,7 +339,17 @@ impl StreamingPipeline {
     /// 分离稳定和不稳定文本
     ///
     /// 保留最后 N 个字符在 Preedit（不稳定），其余部分可以立即上屏（稳定）
+    ///
+    /// 智能过滤：如果整个识别结果包含中文数字，则全部保留在 Preedit，
+    /// 避免 ITN 转换时无法修改已上屏的数字
     fn split_stable_unstable(&self, text: &str) -> (String, String) {
+        // 🎯 优先检查：如果整个文本包含中文数字，全部保留在 Preedit
+        if Self::contains_chinese_number(text) {
+            tracing::debug!("检测到中文数字，全部保留在 Preedit: [{}]", text);
+            return (String::new(), text.to_string());
+        }
+
+        // 如果不包含数字，按正常逻辑分离
         const KEEP_LAST_CHARS: usize = 2; // 保留最后2个字符在 Preedit
 
         let chars: Vec<char> = text.chars().collect();
@@ -354,6 +364,16 @@ impl StreamingPipeline {
         let unstable: String = chars[stable_count..].iter().collect();
 
         (stable, unstable)
+    }
+
+    /// 检查文本是否包含中文数字字符
+    ///
+    /// 用于判断是否需要延迟上屏，等待 ITN 处理
+    fn contains_chinese_number(text: &str) -> bool {
+        text.chars().any(|c| matches!(c,
+            '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' |
+            '十' | '百' | '千' | '万' | '亿' | '点'
+        ))
     }
 
     /// 获取最终识别结果（带标点）
