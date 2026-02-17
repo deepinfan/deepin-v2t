@@ -147,7 +147,8 @@ impl ChineseWordGuard {
         '起', '些', '般', '下', '样', '直', '定', '边', '共',
         '旦', '致', '刻', '切', '向', '律', '再', '度', '时',
         '概', '并', '贯', '如', '经', '味', '身', '番', '帆', '路',
-        '开', '会', '瞬', '辈', '方',  // 新增：开始、会儿、瞬间、辈子、方面
+        '开', '会', '瞬', '辈', '方',  // 开始、会儿、瞬间、辈子、方面
+        '后',  // 零零后、九零后、八零后
     ];
 
     /// 数字单位（数字字符后跟这些字符应该转换）
@@ -155,6 +156,7 @@ impl ChineseWordGuard {
     const NUMERIC_UNITS: &'static [char] = &[
         '十', '百', '千', '万', '亿',  // 数字单位
         '个', '只', '条', '张', '本', '支', '件', '台', '辆', '架',  // 量词
+        '人', '位', '名', '口',  // 人数量词
         '块', '元', '角', '分',  // 货币单位
         '斤', '两', '克', '吨',  // 重量单位
         '米', '厘', '里', '尺',  // 长度单位
@@ -197,29 +199,35 @@ impl ChineseWordGuard {
             return false;
         }
 
-        // 检查第二个字符
-        if chars.len() >= 2 {
-            let second_char = chars[1];
+        // 找到数字序列的结束位置
+        let mut num_end = 0;
+        for (i, &ch) in chars.iter().enumerate() {
+            if matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿') {
+                num_end = i + 1;
+            } else {
+                break;
+            }
+        }
 
-            // 如果第二个字符是数字单位，应该转换
-            if Self::NUMERIC_UNITS.contains(&second_char) {
+        // 检查数字序列后面的第一个字符（而不是最后一个字符）
+        if num_end < chars.len() {
+            let next_char = chars[num_end];
+
+            // 如果紧跟数字单位，应该转换
+            if Self::NUMERIC_UNITS.contains(&next_char) {
                 return false;
             }
 
-            // 如果第二个字符是非数字后缀，不应该转换
-            if Self::NON_NUMERIC_SUFFIXES.contains(&second_char) {
+            // 如果紧跟非数字后缀，不应该转换
+            if Self::NON_NUMERIC_SUFFIXES.contains(&next_char) {
                 return true;
             }
 
-            // 如果第二个字符也是数字字符，继续检查（如 "一千"）
-            if matches!(second_char, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿') {
-                return false;  // 这是数字表达，应该转换
-            }
-
-            // 其他情况：第二个字符是普通汉字，可能是词组，不转换
+            // 其他情况：紧跟普通汉字，可能是词组，不转换
             return true;
         }
 
+        // 纯数字，应该转换
         false
     }
 

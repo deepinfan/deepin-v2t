@@ -42,7 +42,13 @@
       "Bash(git commit:*)",
       "Bash(git push:*)",
       "Bash(cbindgen:*)",
-      "Bash(cmake:*)"
+      "Bash(cmake:*)",
+      "Bash(/tmp/test_guard.rs:*)",
+      "Bash(/tmp/test_suffix.rs:*)",
+      "Bash(/tmp/test_suffix)",
+      "Bash(/tmp/test_difang.rs:*)",
+      "Bash(/tmp/test_yixiazi.rs:*)",
+      "Bash(/tmp/test_sanbai.rs:*)"
     ]
   }
 }
