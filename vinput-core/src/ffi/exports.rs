@@ -173,8 +173,8 @@ impl VInputCoreState {
         const FRAME_SIZE: usize = 512;
         let mut frame_buffer = vec![0.0f32; FRAME_SIZE];
 
-        // 混合模式状态：记录已上屏的稳定文本
-        let mut last_committed_stable = String::new();
+        // 帧计数器，用于节流 Preedit 更新（降低 CPU 占用）
+        let mut frame_counter: u64 = 0;
 
         loop {
             // 检查停止信号
@@ -200,6 +200,7 @@ impl VInputCoreState {
             }
 
             // 送入管道处理
+            frame_counter += 1;
             if let Ok(mut pipe) = pipeline.lock() {
                 match pipe.process(&frame_buffer) {
                     Ok(result) => {
@@ -207,40 +208,24 @@ impl VInputCoreState {
                             tracing::debug!("识别中: {}", result.partial_result);
                         }
 
-                        // 🎯 混合模式：流式上屏稳定文本
+                        // 🎯 实时标点处理：在 Preedit 中显示带逗号的文本
+                        // 节流：每 5 帧（~160ms）更新一次 Preedit，降低 CPU 占用
                         use crate::streaming::PipelineState;
-                        if result.pipeline_state == PipelineState::Recognizing {
-                            // 计算新增的稳定文本
-                            if result.stable_text.len() > last_committed_stable.len() {
-                                let new_stable = &result.stable_text[last_committed_stable.len()..];
+                        if result.pipeline_state == PipelineState::Recognizing && frame_counter % 5 == 0 {
+                            // 获取带实时标点的文本（包含逗号，但不包含句尾标点）
+                            let text_with_punctuation = pipe.get_partial_result_with_punctuation();
 
-                                if !new_stable.is_empty() {
-                                    tracing::debug!("📝 上屏稳定文本: [{}]", new_stable);
+                            if !text_with_punctuation.is_empty() {
+                                tracing::debug!("📝 Preedit 显示（带逗号）: [{}]", text_with_punctuation);
 
-                                    // ⚠️ 注意：稳定文本不做 ITN 处理
-                                    // 因为包含中文数字的文本会被 split_stable_unstable 保留在 Preedit
-                                    // 只有不包含数字的文本才会进入 stable_text
-
-                                    // 立即上屏新增的稳定文本
-                                    if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
-                                        let cmd = VInputCommand::commit_text(new_stable);
-                                        callback(&cmd as *const VInputCommand);
-                                        vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
-                                    }
-
-                                    last_committed_stable = result.stable_text.clone();
-                                }
-                            }
-
-                            // 更新 Preedit 显示不稳定文本
-                            if !result.unstable_text.is_empty() {
+                                // 更新 Preedit 显示带标点的文本
                                 if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
-                                    let cmd = VInputCommand::update_preedit(&result.unstable_text);
+                                    let cmd = VInputCommand::update_preedit(&text_with_punctuation);
                                     callback(&cmd as *const VInputCommand);
                                     vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
                                 }
                             } else {
-                                // 清除 Preedit（如果不稳定文本为空）
+                                // 清除 Preedit（如果文本为空）
                                 if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
                                     let cmd = VInputCommand::clear_preedit();
                                     callback(&cmd as *const VInputCommand);
@@ -284,19 +269,13 @@ impl VInputCoreState {
 
                                 tracing::info!("✅ 最终结果: [{}]", final_result);
 
-                                // 计算剩余未上屏的文本
-                                let remaining_text = if final_result.len() > last_committed_stable.len() {
-                                    &final_result[last_committed_stable.len()..]
-                                } else {
-                                    ""
-                                };
+                                // 一次性上屏完整结果（包含标点）
+                                if !final_result.is_empty() {
+                                    tracing::info!("📝 上屏完整结果: [{}]", final_result);
 
-                                if !remaining_text.is_empty() {
-                                    tracing::info!("📝 上屏剩余文本: [{}]", remaining_text);
-
-                                    // 上屏剩余文本
+                                    // 上屏完整文本
                                     if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
-                                        let cmd = VInputCommand::commit_text(remaining_text);
+                                        let cmd = VInputCommand::commit_text(&final_result);
                                         callback(&cmd as *const VInputCommand);
                                         vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
                                     }
@@ -308,11 +287,8 @@ impl VInputCoreState {
                                     tracing::debug!("已记录到历史，当前历史数: {}", history.len());
                                 }
 
-                                tracing::info!("✨ 混合模式上屏完成");
+                                tracing::info!("✨ 完整结果上屏完成");
                             }
-
-                            // 重置状态
-                            last_committed_stable.clear();
 
                             // 重置 Pipeline 准备下一句
                             let _ = pipe.reset();

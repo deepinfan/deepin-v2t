@@ -151,6 +151,7 @@ fn run_pipewire_loop(
             AudioFormat::F32LE => "f32",
             AudioFormat::S16LE => "s16",
         })
+        .arg("--quality").arg("8")  // 重采样质量：8（高质量，平衡性能）
         .arg("-")  // 输出到 stdout
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

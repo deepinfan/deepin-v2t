@@ -25,7 +25,8 @@ impl AboutPanel {
             ui.add_space(20.0);
 
             // Logo 和标题
-            ui.heading(egui::RichText::new("V-Input").size(32.0).strong());
+            ui.heading(egui::RichText::new("水滴语音输入法").size(32.0).strong());
+            ui.label(egui::RichText::new("Droplet Voice Input").size(16.0).color(egui::Color32::GRAY));
             ui.label(egui::RichText::new("离线中文语音输入法").size(18.0));
 
             ui.add_space(20.0);
@@ -37,6 +38,21 @@ impl AboutPanel {
                     ui.label(format!("版本: {}", self.version));
                     ui.label(format!("构建日期: {}", self.build_date));
                     ui.label("基于 Fcitx5 框架");
+                });
+            });
+
+            ui.add_space(20.0);
+
+            // 首发信息
+            ui.group(|ui| {
+                ui.set_min_width(400.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("首发于深度操作系统论坛").strong());
+                    ui.add_space(5.0);
+                    ui.hyperlink_to(
+                        egui::RichText::new("http://bbs.deepin.org").size(14.0),
+                        "http://bbs.deepin.org"
+                    );
                 });
             });
 
@@ -115,35 +131,6 @@ impl AboutPanel {
 
             ui.add_space(20.0);
 
-            // 链接
-            ui.group(|ui| {
-                ui.set_min_width(400.0);
-                ui.label(egui::RichText::new("相关链接").strong());
-                ui.add_space(5.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("📖");
-                    ui.hyperlink_to("用户手册", "https://github.com/yourusername/vinput/wiki");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("🐛");
-                    ui.hyperlink_to("问题反馈", "https://github.com/yourusername/vinput/issues");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("💻");
-                    ui.hyperlink_to("源代码", "https://github.com/yourusername/vinput");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("📄");
-                    ui.hyperlink_to("许可证", "https://github.com/yourusername/vinput/blob/main/LICENSE");
-                });
-            });
-
-            ui.add_space(20.0);
-
             // 致谢
             ui.group(|ui| {
                 ui.set_min_width(400.0);
@@ -163,7 +150,7 @@ impl AboutPanel {
             ui.add_space(20.0);
 
             // 版权信息
-            ui.label(egui::RichText::new("Copyright © 2026 V-Input Contributors").size(12.0));
+            ui.label(egui::RichText::new("Copyright © 2026 水滴语音输入法贡献者").size(12.0));
             ui.label(egui::RichText::new("Licensed under MIT License").size(12.0));
 
             ui.add_space(20.0);

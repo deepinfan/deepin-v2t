@@ -11,7 +11,6 @@ use eframe::egui;
 mod config;
 mod basic_settings_panel;
 mod recognition_settings_panel;
-mod model_manager_panel;
 mod advanced_settings_panel;
 mod about_panel;
 mod endpoint_panel;
@@ -22,7 +21,6 @@ mod vad_asr_panel;
 use config::VInputConfig;
 use basic_settings_panel::BasicSettingsPanel;
 use recognition_settings_panel::RecognitionSettingsPanel;
-use model_manager_panel::ModelManagerPanel;
 use advanced_settings_panel::AdvancedSettingsPanel;
 use about_panel::AboutPanel;
 use endpoint_panel::EndpointPanel;
@@ -38,12 +36,12 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([800.0, 600.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("V-Input 设置"),
+            .with_title("水滴语音输入法 - 设置"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "V-Input Settings",
+        "Droplet Voice Input Settings",
         options,
         Box::new(|cc| Ok(Box::new(VInputApp::new(cc)))),
     )
@@ -59,8 +57,6 @@ struct VInputApp {
     basic_settings_panel: BasicSettingsPanel,
     /// 识别设置面板
     recognition_settings_panel: RecognitionSettingsPanel,
-    /// 模型管理面板
-    model_manager_panel: ModelManagerPanel,
     /// 高级设置面板
     advanced_settings_panel: AdvancedSettingsPanel,
     /// 关于面板
@@ -81,7 +77,6 @@ struct VInputApp {
 enum Tab {
     Basic,
     Recognition,
-    Models,
     Hotwords,
     Punctuation,
     Advanced,
@@ -102,7 +97,6 @@ impl VInputApp {
             active_tab: Tab::Basic,
             basic_settings_panel: BasicSettingsPanel::new(&config),
             recognition_settings_panel: RecognitionSettingsPanel::new(&config),
-            model_manager_panel: ModelManagerPanel::new(&config),
             advanced_settings_panel: AdvancedSettingsPanel::new(&config),
             about_panel: AboutPanel::new(&config),
             hotwords_editor: HotwordsEditor::new(&config),
@@ -162,7 +156,6 @@ impl VInputApp {
         // 从各个面板收集配置
         self.basic_settings_panel.apply_to_config(&mut self.config);
         self.recognition_settings_panel.apply_to_config(&mut self.config);
-        self.model_manager_panel.apply_to_config(&mut self.config);
         self.advanced_settings_panel.apply_to_config(&mut self.config);
         self.hotwords_editor.apply_to_config(&mut self.config);
         self.punctuation_panel.apply_to_config(&mut self.config);
@@ -182,7 +175,6 @@ impl VInputApp {
         self.config = VInputConfig::default();
         self.basic_settings_panel = BasicSettingsPanel::new(&self.config);
         self.recognition_settings_panel = RecognitionSettingsPanel::new(&self.config);
-        self.model_manager_panel = ModelManagerPanel::new(&self.config);
         self.advanced_settings_panel = AdvancedSettingsPanel::new(&self.config);
         self.hotwords_editor = HotwordsEditor::new(&self.config);
         self.punctuation_panel = PunctuationPanel::new(&self.config);
@@ -260,13 +252,6 @@ impl eframe::App for VInputApp {
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Models, "📦 模型管理")
-                .clicked()
-            {
-                self.active_tab = Tab::Models;
-            }
-
-            if ui
                 .selectable_label(self.active_tab == Tab::Hotwords, "🔥 热词管理")
                 .clicked()
             {
@@ -322,12 +307,6 @@ impl eframe::App for VInputApp {
                 }
                 Tab::Recognition => {
                     let modified = self.recognition_settings_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::Models => {
-                    let modified = self.model_manager_panel.ui(ui);
                     if modified {
                         self.config_modified = true;
                     }

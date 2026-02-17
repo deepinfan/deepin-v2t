@@ -1,0 +1,59 @@
+# V-Input 热词配置示例
+
+# 热词配置
+[hotwords]
+global_weight = 2.5
+max_words = 10000
+
+# 热词列表（词汇 → 权重）
+[hotwords.words]
+# 技术术语
+"深度学习" = 3.0
+"人工智能" = 2.5
+"神经网络" = 2.5
+"机器学习" = 2.0
+"自然语言处理" = 2.0
+
+# 编程语言
+"Python" = 2.0
+"JavaScript" = 2.0
+"TypeScript" = 2.0
+"Rust" = 2.0
+
+# 框架和工具
+"PyTorch" = 2.5
+"TensorFlow" = 2.5
+"Kubernetes" = 2.0
+"Docker" = 2.0
+
+# 标点配置
+[punctuation]
+style = "Professional"
+pause_ratio = 2.0
+min_tokens = 3
+allow_exclamation = false
+question_strict = true
+
+# VAD 配置
+[vad]
+mode = "PushToTalk"
+start_threshold = 0.5
+end_threshold = 0.3
+min_speech_duration = 250
+min_silence_duration = 300
+
+# ASR 配置
+[asr]
+model_dir = "/home/deepin/deepin-v2t/models/streaming"
+sample_rate = 16000
+hotwords_score = 1.5
+max_active_paths = 2
+
+# 端点检测配置
+[endpoint]
+min_speech_duration_ms = 300
+max_speech_duration_ms = 30000
+trailing_silence_ms = 800
+force_timeout_ms = 60000
+vad_assisted = true
+vad_silence_confirm_frames = 5

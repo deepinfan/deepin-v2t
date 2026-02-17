@@ -49,7 +49,12 @@
       "Bash(/tmp/test_difang.rs:*)",
       "Bash(/tmp/test_yixiazi.rs:*)",
       "Bash(/tmp/test_sanbai.rs:*)",
-      "Bash(/tmp/test_logging.sh:*)"
+      "Bash(/tmp/test_logging.sh:*)",
+      "Bash(sudo chmod:*)",
+      "Bash(sudo ldconfig:*)",
+      "Bash(journalctl:*)",
+      "Bash(sudo ./install-fcitx5-plugin.sh:*)",
+      "Bash(pw-record:*)"
     ]
   }
 }
