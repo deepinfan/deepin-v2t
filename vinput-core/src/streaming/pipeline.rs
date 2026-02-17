@@ -71,7 +71,7 @@ pub struct StreamingResult {
 pub struct StreamingPipeline {
     config: StreamingConfig,
     vad_manager: VadManager,
-    asr_recognizer: OnlineRecognizer,
+    asr_recognizer: Option<OnlineRecognizer>,  // 改为 Option，支持懒加载
     asr_stream: Option<OnlineStream<'static>>,
     punctuation_engine: PunctuationEngine,
     endpoint_detector: EndpointDetector,
@@ -84,10 +84,13 @@ pub struct StreamingPipeline {
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
+
+    /// ASR 是否已加载
+    asr_loaded: bool,
 }
 
 impl StreamingPipeline {
-    /// 创建新的流式管道
+    /// 创建新的流式管道（懒加载模式）
     pub fn new(config: StreamingConfig) -> VInputResult<Self> {
         tracing::info!("📍 StreamingPipeline::new - 接收到的标点配置: pause_ratio={}, min_tokens={}",
             config.punctuation_profile.streaming_pause_ratio,
@@ -98,15 +101,16 @@ impl StreamingPipeline {
             config.endpoint_config.min_speech_duration_ms
         );
 
+        tracing::info!("🚀 使用懒加载模式：启动时仅加载 VAD，首次语音时加载 ASR");
+
         let vad_manager = VadManager::new(config.vad_config.clone())?;
-        let asr_recognizer = OnlineRecognizer::new(&config.asr_config)?;
         let punctuation_engine = PunctuationEngine::new(config.punctuation_profile.clone());
         let endpoint_detector = EndpointDetector::new(config.endpoint_config.clone());
 
         Ok(Self {
             config,
             vad_manager,
-            asr_recognizer,
+            asr_recognizer: None,  // 懒加载：启动时不加载 ASR
             punctuation_engine,
             endpoint_detector,
             asr_stream: None,
@@ -114,7 +118,31 @@ impl StreamingPipeline {
             speech_start_time: None,
             total_frames: 0,
             asr_frames: 0,
+            asr_loaded: false,
         })
+    }
+
+    /// 确保 ASR 已加载（懒加载）
+    fn ensure_asr_loaded(&mut self) -> VInputResult<()> {
+        if self.asr_loaded {
+            return Ok(());
+        }
+
+        tracing::info!("⏳ 首次检测到语音，开始加载 ASR 模型...");
+        let start = Instant::now();
+
+        let asr_recognizer = OnlineRecognizer::new(&self.config.asr_config)?;
+
+        let elapsed = start.elapsed();
+        tracing::info!("✅ ASR 模型加载完成，耗时: {:.2}s", elapsed.as_secs_f32());
+
+        // 🔥 预热模型缓存
+        asr_recognizer.warmup()?;
+
+        self.asr_recognizer = Some(asr_recognizer);
+        self.asr_loaded = true;
+
+        Ok(())
     }
 
     /// 处理音频帧
@@ -180,8 +208,13 @@ impl StreamingPipeline {
                     (PipelineState::Idle, VadState::Speech) if vad_result.state_changed => {
                         tracing::info!("Pipeline: Speech detected, starting ASR");
 
+                        // 🚀 懒加载：首次检测到语音时加载 ASR
+                        self.ensure_asr_loaded()?;
+
                         // 创建新的 ASR 流
-                        let mut stream = self.asr_recognizer.create_stream()?;
+                        let asr_recognizer = self.asr_recognizer.as_ref()
+                            .expect("ASR should be loaded");
+                        let mut stream = asr_recognizer.create_stream()?;
 
                         // 注入 Pre-roll 音频（如果有）
                         if let Some(pre_roll_audio) = &vad_result.pre_roll_audio {
@@ -224,13 +257,13 @@ impl StreamingPipeline {
 
         // 4. 执行 ASR 解码（如果流准备好）并检查 ASR 端点
         if self.pipeline_state == PipelineState::Recognizing {
-            if let Some(stream) = &mut self.asr_stream {
-                if stream.is_ready(&self.asr_recognizer) {
-                    stream.decode(&self.asr_recognizer);
+            if let (Some(stream), Some(recognizer)) = (&mut self.asr_stream, &self.asr_recognizer) {
+                if stream.is_ready(recognizer) {
+                    stream.decode(recognizer);
                 }
 
                 // 使用 EndpointDetector 检查 ASR 端点
-                let asr_endpoint = stream.is_endpoint(&self.asr_recognizer);
+                let asr_endpoint = stream.is_endpoint(recognizer);
                 let asr_result = self.endpoint_detector.process_asr_endpoint(asr_endpoint);
 
                 if asr_result == EndpointResult::Detected {
@@ -242,8 +275,8 @@ impl StreamingPipeline {
         }
 
         // 5. 获取识别结果
-        let partial_result = if let Some(stream) = &self.asr_stream {
-            stream.get_result(&self.asr_recognizer)
+        let partial_result = if let (Some(stream), Some(recognizer)) = (&self.asr_stream, &self.asr_recognizer) {
+            stream.get_result(recognizer)
         } else {
             String::new()
         };
@@ -290,8 +323,8 @@ impl StreamingPipeline {
         tracing::debug!("Pipeline: Resetting");
 
         // 销毁 ASR 流
-        if let Some(mut stream) = self.asr_stream.take() {
-            stream.reset(&self.asr_recognizer);
+        if let (Some(mut stream), Some(recognizer)) = (self.asr_stream.take(), &self.asr_recognizer) {
+            stream.reset(recognizer);
         }
 
         // 重置 VAD
@@ -379,9 +412,9 @@ impl StreamingPipeline {
     ///
     /// 调用此方法后会自动重置管道状态
     pub fn get_final_result_with_punctuation(&mut self) -> String {
-        let result = if let Some(stream) = &self.asr_stream {
+        let result = if let (Some(stream), Some(recognizer)) = (&self.asr_stream, &self.asr_recognizer) {
             // 获取详细结果（包含 Token 和时间戳）
-            let detailed_result = stream.get_detailed_result(&self.asr_recognizer);
+            let detailed_result = stream.get_detailed_result(recognizer);
 
             tracing::debug!("📊 识别结果详情: text='{}', token_count={}",
                 detailed_result.text, detailed_result.tokens.len());
@@ -448,8 +481,8 @@ impl StreamingPipeline {
     ///
     /// 调用此方法后会自动重置管道状态
     pub fn get_final_result(&mut self) -> String {
-        let result = if let Some(stream) = &self.asr_stream {
-            stream.get_result(&self.asr_recognizer)
+        let result = if let (Some(stream), Some(recognizer)) = (&self.asr_stream, &self.asr_recognizer) {
+            stream.get_result(recognizer)
         } else {
             String::new()
         };
@@ -464,8 +497,8 @@ impl StreamingPipeline {
 impl Drop for StreamingPipeline {
     fn drop(&mut self) {
         // 确保 ASR 流在管道销毁前被清理
-        if let Some(mut stream) = self.asr_stream.take() {
-            stream.reset(&self.asr_recognizer);
+        if let (Some(mut stream), Some(recognizer)) = (self.asr_stream.take(), &self.asr_recognizer) {
+            stream.reset(recognizer);
         }
     }
 }

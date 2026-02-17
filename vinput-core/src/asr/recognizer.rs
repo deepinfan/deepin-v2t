@@ -229,6 +229,34 @@ impl OnlineRecognizer {
         Ok(Self { inner: recognizer })
     }
 
+    /// 预热模型缓存
+    ///
+    /// 运行一次 dummy 推理，预热 ONNX Runtime 缓存，减少首次推理延迟
+    pub fn warmup(&self) -> VInputResult<()> {
+        tracing::info!("🔥 开始预热 ASR 模型缓存...");
+        let start = std::time::Instant::now();
+
+        // 创建临时流
+        let mut stream = self.create_stream()?;
+
+        // 送入 dummy 音频（512 samples = 32ms @ 16kHz）
+        let dummy_audio = vec![0.0f32; 512];
+        stream.accept_waveform(&dummy_audio, 16000);
+
+        // 执行一次解码
+        if stream.is_ready(self) {
+            stream.decode(self);
+        }
+
+        // 获取结果（忽略）
+        let _ = stream.get_result(self);
+
+        let elapsed = start.elapsed();
+        tracing::info!("✅ 模型预热完成，耗时: {:.2}ms", elapsed.as_secs_f32() * 1000.0);
+
+        Ok(())
+    }
+
     /// 创建新的识别流
     pub fn create_stream(&self) -> VInputResult<OnlineStream<'_>> {
         let stream = unsafe { SherpaOnnxCreateOnlineStream(self.inner) };
