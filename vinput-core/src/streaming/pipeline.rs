@@ -345,7 +345,6 @@ impl StreamingPipeline {
     fn split_stable_unstable(&self, text: &str) -> (String, String) {
         // 🎯 优先检查：如果整个文本包含中文数字，全部保留在 Preedit
         if Self::contains_chinese_number(text) {
-            tracing::debug!("检测到中文数字，全部保留在 Preedit: [{}]", text);
             return (String::new(), text.to_string());
         }
 

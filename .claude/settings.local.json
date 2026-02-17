@@ -48,7 +48,8 @@
       "Bash(/tmp/test_suffix)",
       "Bash(/tmp/test_difang.rs:*)",
       "Bash(/tmp/test_yixiazi.rs:*)",
-      "Bash(/tmp/test_sanbai.rs:*)"
+      "Bash(/tmp/test_sanbai.rs:*)",
+      "Bash(/tmp/test_logging.sh:*)"
     ]
   }
 }

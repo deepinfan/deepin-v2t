@@ -130,9 +130,10 @@ impl OnlineRecognizer {
         }
 
         // 构建 C API 配置
-        let encoder_path = model_dir.join("encoder-epoch-99-avg-1.onnx");
-        let decoder_path = model_dir.join("decoder-epoch-99-avg-1.onnx");
-        let joiner_path = model_dir.join("joiner-epoch-99-avg-1.onnx");
+        // 使用 INT8 量化模型（更小、更快，精度略有下降）
+        let encoder_path = model_dir.join("encoder-epoch-99-avg-1.int8.onnx");
+        let decoder_path = model_dir.join("decoder-epoch-99-avg-1.int8.onnx");
+        let joiner_path = model_dir.join("joiner-epoch-99-avg-1.int8.onnx");
         let tokens_path = model_dir.join("tokens.txt");
 
         // 转换为 CString

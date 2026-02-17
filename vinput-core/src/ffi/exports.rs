@@ -217,6 +217,10 @@ impl VInputCoreState {
                                 if !new_stable.is_empty() {
                                     tracing::debug!("📝 上屏稳定文本: [{}]", new_stable);
 
+                                    // ⚠️ 注意：稳定文本不做 ITN 处理
+                                    // 因为包含中文数字的文本会被 split_stable_unstable 保留在 Preedit
+                                    // 只有不包含数字的文本才会进入 stable_text
+
                                     // 立即上屏新增的稳定文本
                                     if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
                                         let cmd = VInputCommand::commit_text(new_stable);
@@ -264,7 +268,6 @@ impl VInputCoreState {
 
                                 // 应用 ITN
                                 let final_result = if let Ok(itn) = itn_engine.lock() {
-                                    tracing::info!("📝 开始 ITN 处理...");
                                     let itn_result = itn.process(&raw_result_with_punct);
 
                                     if !itn_result.changes.is_empty() {
@@ -272,8 +275,6 @@ impl VInputCoreState {
                                         for change in &itn_result.changes {
                                             tracing::info!("    '{}' → '{}'", change.original_text, change.normalized_text);
                                         }
-                                    } else {
-                                        tracing::info!("📋 ITN: 无需变更（输入已是规范格式）");
                                     }
 
                                     itn_result.text
