@@ -10,9 +10,6 @@ name = "vinput-settings"
 path = "src/main.rs"
 
 [dependencies]
-# Workspace dependencies
-vinput-core = { path = "../vinput-core" }
-
 # egui 相关
 eframe = "0.31"  # egui 框架
 egui = "0.31"    # egui 核心

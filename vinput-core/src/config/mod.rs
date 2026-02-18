@@ -28,9 +28,21 @@ pub struct VInputConfig {
 
 impl Default for VInputConfig {
     fn default() -> Self {
-        // 默认模型路径
+        // 默认模型路径优先级：
+        // 1. 环境变量 VINPUT_MODEL_DIR
+        // 2. 系统安装路径 /usr/share/droplet-voice-input/models
+        // 3. 开发路径 ./models/streaming
         let default_model_dir = std::env::var("VINPUT_MODEL_DIR")
-            .unwrap_or_else(|_| "/home/deepin/deepin-v2t/models/streaming".to_string());
+            .unwrap_or_else(|_| {
+                // 检查系统安装路径
+                let system_path = "/usr/share/droplet-voice-input/models";
+                if std::path::Path::new(system_path).exists() {
+                    system_path.to_string()
+                } else {
+                    // 开发环境路径
+                    "./models/streaming".to_string()
+                }
+            });
 
         let mut asr_config = OnlineRecognizerConfig::default();
         asr_config.model_dir = default_model_dir;

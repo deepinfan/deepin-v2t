@@ -17,3 +17,11 @@ crossbeam-channel = "0.5"
 rtrb = "0.3"
 notify = "6.1"
 regex = "1.11"
+
+# Release 优化配置
+[profile.release]
+opt-level = "z"        # 优化体积
+lto = true             # 链接时优化
+codegen-units = 1      # 单个代码生成单元（更好的优化）
+strip = true           # 自动 strip 符号
+panic = "abort"        # panic 时直接 abort（减小体积）

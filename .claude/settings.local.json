@@ -54,7 +54,13 @@
       "Bash(sudo ldconfig:*)",
       "Bash(journalctl:*)",
       "Bash(sudo ./install-fcitx5-plugin.sh:*)",
-      "Bash(pw-record:*)"
+      "Bash(pw-record:*)",
+      "Bash(strip --strip-all:*)",
+      "Bash(cargo tree:*)",
+      "Bash(cargo bloat:*)",
+      "Bash(/home/deepin/deepin-v2t/build-deb.sh:*)",
+      "Bash(./build-deb.sh)",
+      "Bash(/home/deepin/deepin-v2t/check-installation.sh:*)"
     ]
   }
 }
