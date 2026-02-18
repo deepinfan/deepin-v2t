@@ -201,3 +201,138 @@ impl VInputConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_creation() {
+        let config = VInputConfig::default();
+
+        // 验证默认值
+        assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
+        assert_eq!(config.asr.sample_rate, 16000);
+        assert_eq!(config.vad.start_threshold, 0.7);
+        assert_eq!(config.vad.min_silence_duration, 700);
+        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
+        assert_eq!(config.endpoint.vad_silence_confirm_frames, 8);
+    }
+
+    #[test]
+    fn test_config_serialization() {
+        let config = VInputConfig::default();
+
+        // 序列化为 TOML
+        let toml_str = toml::to_string_pretty(&config).expect("Failed to serialize");
+
+        // 验证包含关键字段
+        assert!(toml_str.contains("model_dir"));
+        assert!(toml_str.contains("start_threshold"));
+        assert!(toml_str.contains("trailing_silence_ms"));
+    }
+
+    #[test]
+    fn test_config_deserialization() {
+        let toml_str = r#"
+[hotwords]
+words = {}
+global_weight = 2.5
+max_words = 10000
+
+[punctuation]
+style = "Professional"
+pause_ratio = 3.5
+min_tokens = 5
+allow_exclamation = false
+question_strict = true
+
+[vad]
+mode = "push-to-talk"
+start_threshold = 0.7
+end_threshold = 0.35
+min_speech_duration = 100
+min_silence_duration = 700
+
+[asr]
+model_dir = "/usr/share/droplet-voice-input/models"
+sample_rate = 16000
+hotwords_score = 1.5
+
+[endpoint]
+min_speech_duration_ms = 300
+max_speech_duration_ms = 30000
+trailing_silence_ms = 1000
+force_timeout_ms = 60000
+vad_assisted = true
+vad_silence_confirm_frames = 8
+"#;
+
+        let config: VInputConfig = toml::from_str(toml_str).expect("Failed to deserialize");
+
+        // 验证反序列化的值
+        assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
+        assert_eq!(config.vad.start_threshold, 0.7);
+        assert_eq!(config.vad.min_silence_duration, 700);
+        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let original = VInputConfig::default();
+
+        // 序列化
+        let toml_str = toml::to_string_pretty(&original).expect("Failed to serialize");
+
+        // 反序列化
+        let deserialized: VInputConfig = toml::from_str(&toml_str).expect("Failed to deserialize");
+
+        // 验证关键字段一致
+        assert_eq!(original.asr.model_dir, deserialized.asr.model_dir);
+        assert_eq!(original.vad.start_threshold, deserialized.vad.start_threshold);
+        assert_eq!(original.endpoint.trailing_silence_ms, deserialized.endpoint.trailing_silence_ms);
+    }
+
+    #[test]
+    fn test_vad_config_values() {
+        let config = VInputConfig::default();
+
+        // 验证 VAD 参数在合理范围内
+        assert!(config.vad.start_threshold >= 0.0 && config.vad.start_threshold <= 1.0);
+        assert!(config.vad.end_threshold >= 0.0 && config.vad.end_threshold <= 1.0);
+        assert!(config.vad.start_threshold > config.vad.end_threshold);
+        assert!(config.vad.min_silence_duration > 0);
+    }
+
+    #[test]
+    fn test_endpoint_config_values() {
+        let config = VInputConfig::default();
+
+        // 验证端点检测参数在合理范围内
+        assert!(config.endpoint.min_speech_duration_ms > 0);
+        assert!(config.endpoint.max_speech_duration_ms > config.endpoint.min_speech_duration_ms);
+        assert!(config.endpoint.trailing_silence_ms > 0);
+        assert!(config.endpoint.vad_silence_confirm_frames > 0);
+    }
+
+    #[test]
+    fn test_hotwords_config() {
+        let config = VInputConfig::default();
+
+        // 验证热词配置
+        assert!(config.hotwords.words.is_empty());
+        assert!(config.hotwords.global_weight > 0.0);
+        assert!(config.hotwords.max_words > 0);
+    }
+
+    #[test]
+    fn test_punctuation_config() {
+        let config = VInputConfig::default();
+
+        // 验证标点配置
+        assert_eq!(config.punctuation.style, "Professional");
+        assert!(config.punctuation.pause_ratio > 0.0);
+        assert!(config.punctuation.min_tokens > 0);
+    }
+}
+
