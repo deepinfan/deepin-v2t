@@ -60,10 +60,10 @@ fn default_energy_gate_config() -> EnergyGateConfig {
 
 fn default_hysteresis_config() -> HysteresisConfig {
     HysteresisConfig {
-        start_threshold: 0.6,
-        end_threshold: 0.35,
-        min_speech_duration_ms: 100,
-        min_silence_duration_ms: 500,
+        start_threshold: 0.7,           // 提高到 0.7（原 0.6）- 减少背景噪音误触发
+        end_threshold: 0.35,            // 保持 0.35
+        min_speech_duration_ms: 100,    // 保持 100ms
+        min_silence_duration_ms: 700,   // 增加到 700ms（原 500ms）- 给最后一个字更多时间
     }
 }
 

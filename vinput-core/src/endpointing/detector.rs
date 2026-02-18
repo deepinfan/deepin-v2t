@@ -41,20 +41,20 @@ pub struct EndpointDetectorConfig {
 
 fn default_min_speech_ms() -> u64 { 300 }
 fn default_max_speech_ms() -> u64 { 30_000 }
-fn default_trailing_silence_ms() -> u64 { 800 }
+fn default_trailing_silence_ms() -> u64 { 1000 }  // 增加到 1000ms（原 800ms）
 fn default_force_timeout_ms() -> u64 { 60_000 }
 fn default_true() -> bool { true }
-fn default_vad_silence_frames() -> usize { 5 }
+fn default_vad_silence_frames() -> usize { 8 }  // 增加到 8 帧（原 5 帧）约 256ms
 
 impl Default for EndpointDetectorConfig {
     fn default() -> Self {
         Self {
             min_speech_duration_ms: 300,        // 300ms 最小语音
             max_speech_duration_ms: 30_000,     // 30s 最大语音（自动分段）
-            trailing_silence_ms: 800,           // 800ms 尾部静音
+            trailing_silence_ms: 1000,          // 1000ms 尾部静音（增加）
             force_timeout_ms: 60_000,           // 60s 强制超时
             vad_assisted: true,                 // 启用 VAD 辅助
-            vad_silence_confirm_frames: 5,      // 5 帧静音确认（约 160ms @ 32ms/frame）
+            vad_silence_confirm_frames: 8,      // 8 帧静音确认（约 256ms @ 32ms/frame）
         }
     }
 }
