@@ -97,10 +97,10 @@ impl Default for EndpointConfig {
         Self {
             min_speech_duration_ms: 300,
             max_speech_duration_ms: 30000,
-            trailing_silence_ms: 800,
+            trailing_silence_ms: 1000,      // 更新为新的默认值
             force_timeout_ms: 60000,
             vad_assisted: true,
-            vad_silence_confirm_frames: 5,
+            vad_silence_confirm_frames: 8,  // 更新为新的默认值
         }
     }
 }
@@ -122,13 +122,13 @@ impl Default for VInputConfig {
             },
             vad: VadConfig {
                 mode: "push-to-talk".to_string(),
-                start_threshold: 0.5,
-                end_threshold: 0.3,
-                min_speech_duration: 250,
-                min_silence_duration: 300,
+                start_threshold: 0.7,  // 更新为新的默认值
+                end_threshold: 0.35,   // 更新为新的默认值
+                min_speech_duration: 100,
+                min_silence_duration: 700,  // 更新为新的默认值
             },
             asr: AsrConfig {
-                model_dir: "/home/deepin/deepin-v2t/models/streaming".to_string(),
+                model_dir: "/usr/share/droplet-voice-input/models".to_string(),  // 使用系统路径
                 sample_rate: 16000,
                 hotwords_file: None,
                 hotwords_score: 1.5,
@@ -151,12 +151,39 @@ impl VInputConfig {
     /// 加载配置
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::config_path();
+
         if !path.exists() {
-            return Ok(Self::default());
+            tracing::info!("配置文件不存在，尝试从示例文件创建: {:?}", path);
+
+            // 尝试从系统示例文件复制
+            let example_path = PathBuf::from("/usr/share/droplet-voice-input/config.toml.example");
+            if example_path.exists() {
+                tracing::info!("从系统示例文件复制: {:?}", example_path);
+
+                // 确保目录存在
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                // 复制示例文件
+                fs::copy(&example_path, &path)?;
+                tracing::info!("配置文件创建成功: {:?}", path);
+            } else {
+                tracing::info!("示例文件不存在，使用默认配置并保存");
+
+                // 使用默认配置并保存
+                let default_config = Self::default();
+                default_config.save()?;
+                tracing::info!("默认配置已保存: {:?}", path);
+
+                return Ok(default_config);
+            }
         }
 
-        let content = fs::read_to_string(path)?;
+        // 读取配置文件
+        let content = fs::read_to_string(&path)?;
         let config: VInputConfig = toml::from_str(&content)?;
+        tracing::info!("配置加载成功: {:?}", path);
         Ok(config)
     }
 
