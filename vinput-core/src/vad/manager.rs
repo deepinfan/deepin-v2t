@@ -41,6 +41,12 @@ pub struct VadManager {
 
     /// 上一次的 VAD 状态（用于检测状态转换）
     last_state: VadState,
+
+    /// 诊断计数器（周期性打印 VAD 内部状态）
+    diag_frame_count: u64,
+    diag_energy_gate_pass: u64,
+    diag_max_prob: f32,
+    diag_max_rms: f32,
 }
 
 impl VadManager {
@@ -65,6 +71,10 @@ impl VadManager {
             transient_filter: TransientFilter::new(config.transient_filter.clone()),
             silero_vad,
             last_state: VadState::Silence,
+            diag_frame_count: 0,
+            diag_energy_gate_pass: 0,
+            diag_max_prob: 0.0,
+            diag_max_rms: 0.0,
             config,
         })
     }
@@ -87,15 +97,55 @@ impl VadManager {
             // 2. Silero VAD - 核心检测
             let prob = self.silero_vad.process_chunk(samples)?;
 
+            // 每帧记录 silero 原始概率（DEBUG 级别，info 模式下不显示）
+            tracing::debug!("VAD prob={:.3}", prob);
+
+            // 诊断统计
+            self.diag_energy_gate_pass += 1;
+            if prob > self.diag_max_prob {
+                self.diag_max_prob = prob;
+            }
+
             // 3. Hysteresis Controller - 状态管理
             let (new_state, changed) = self.hysteresis.process(prob);
 
             (prob, new_state, changed)
         } else {
+            tracing::debug!("VAD EnergyGate blocked");
             // Energy Gate 未通过，直接返回低概率
             let (new_state, changed) = self.hysteresis.process(0.0);
             (0.0, new_state, changed)
         };
+
+        // 更新 RMS 诊断统计
+        let rms = {
+            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+            (sum_sq / samples.len() as f32).sqrt()
+        };
+        if rms > self.diag_max_rms {
+            self.diag_max_rms = rms;
+        }
+
+        self.diag_frame_count += 1;
+
+        // 每 50 帧（约 1.6 秒）打印一次诊断信息（INFO 级别，始终可见）
+        const DIAG_INTERVAL: u64 = 50;
+        if self.diag_frame_count % DIAG_INTERVAL == 0 {
+            let pass_ratio = self.diag_energy_gate_pass as f64 / DIAG_INTERVAL as f64;
+            tracing::info!(
+                "VAD 诊断 [帧 {}]: EnergyGate通过={:.0}%, 最高RMS={:.4}, 最高prob={:.3}, start_thresh={:.2}, 当前状态={:?}",
+                self.diag_frame_count,
+                pass_ratio * 100.0,
+                self.diag_max_rms,
+                self.diag_max_prob,
+                self.config.hysteresis.start_threshold,
+                state,
+            );
+            // 重置窗口统计
+            self.diag_energy_gate_pass = 0;
+            self.diag_max_prob = 0.0;
+            self.diag_max_rms = 0.0;
+        }
 
         // 4. Transient Filter - 短爆发过滤
         let is_speech = matches!(state, VadState::Speech | VadState::SpeechCandidate);
@@ -164,6 +214,10 @@ impl VadManager {
         self.transient_filter.reset();
         self.silero_vad.reset();
         self.last_state = VadState::Silence;
+        self.diag_frame_count = 0;
+        self.diag_energy_gate_pass = 0;
+        self.diag_max_prob = 0.0;
+        self.diag_max_rms = 0.0;
         tracing::debug!("VadManager reset");
     }
 
@@ -198,6 +252,10 @@ impl VadManager {
             pre_roll_buffer: PreRollBuffer::new(config.pre_roll.clone()),
             transient_filter: TransientFilter::new(config.transient_filter.clone()),
             last_state: VadState::Silence,
+            diag_frame_count: 0,
+            diag_energy_gate_pass: 0,
+            diag_max_prob: 0.0,
+            diag_max_rms: 0.0,
             config,
         })
     }
@@ -239,6 +297,10 @@ impl VadManager {
         self.pre_roll_buffer.reset();
         self.transient_filter.reset();
         self.last_state = VadState::Silence;
+        self.diag_frame_count = 0;
+        self.diag_energy_gate_pass = 0;
+        self.diag_max_prob = 0.0;
+        self.diag_max_rms = 0.0;
     }
 }
 

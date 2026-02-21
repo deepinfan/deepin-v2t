@@ -99,15 +99,33 @@ impl HysteresisController {
                     // 进入静音候选状态
                     self.state = VadState::SilenceCandidate;
                     self.state_enter_time = Some(now);
-                    tracing::debug!("VAD: Speech → SilenceCandidate (prob={:.3})", speech_prob);
+                    tracing::info!("VAD: Speech → SilenceCandidate (prob={:.3})", speech_prob);
                 } else {
                     self.consecutive_speech_frames += 1;
                     self.consecutive_silence_frames = 0;
+                    // 每 30 帧（约 1 秒）记录一次概率，帮助诊断
+                    if self.consecutive_speech_frames % 30 == 1 {
+                        tracing::info!(
+                            "VAD: Speech 持续 (prob={:.3}, end_thresh={:.2}, start_thresh={:.2}, frames={})",
+                            speech_prob,
+                            self.config.end_threshold,
+                            self.config.start_threshold,
+                            self.consecutive_speech_frames,
+                        );
+                    }
                 }
             }
 
             VadState::SilenceCandidate => {
-                if speech_prob < self.config.end_threshold {
+                if speech_prob >= self.config.start_threshold {
+                    // 强语音信号（≥ start_threshold），立即恢复语音状态
+                    self.state = VadState::Speech;
+                    self.state_enter_time = None;
+                    self.consecutive_silence_frames = 0;
+                    self.consecutive_speech_frames += 1;
+                    tracing::info!("VAD: SilenceCandidate → Speech (prob={:.3}, 强语音)", speech_prob);
+                } else if speech_prob < self.config.end_threshold {
+                    // 明确静音（< end_threshold），继续计时
                     self.consecutive_silence_frames += 1;
                     self.consecutive_speech_frames = 0;
 
@@ -121,14 +139,9 @@ impl HysteresisController {
                             tracing::info!("VAD: SilenceCandidate → Silence (duration={:?})", duration);
                         }
                     }
-                } else {
-                    // 概率上升，返回语音
-                    self.state = VadState::Speech;
-                    self.state_enter_time = None;
-                    self.consecutive_silence_frames = 0;
-                    self.consecutive_speech_frames += 1;
-                    tracing::debug!("VAD: SilenceCandidate → Speech (prob={:.3})", speech_prob);
                 }
+                // else: end_threshold ≤ prob < start_threshold → 保持 SilenceCandidate（死区）
+                // 背景噪声在此区间时，计时继续运行，不返回语音状态
             }
         }
 

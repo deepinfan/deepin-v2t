@@ -80,23 +80,14 @@ pub struct StreamingPipeline {
     /// 语音开始时间
     speech_start_time: Option<Instant>,
 
+    /// ASR endpoint 检测到后的缓冲帧数（还剩多少帧才真正提交）
+    /// 0 表示没有待提交的 endpoint，> 0 表示仍在缓冲期（继续喂音频）
+    asr_endpoint_grace_remaining: u32,
+
     /// 累积的音频帧数（用于调试）
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
-
-    // --- VAD 停顿追踪（用于逗号插入）---
-    /// 记录的停顿事件：(停顿前累计语音时长ms, 停顿时长ms)
-    /// 使用语音时间比例而非字符数，避免 Paraformer 流式结果延迟问题
-    pause_markers: Vec<(u64, u64)>,
-    /// 上一帧是否为语音状态
-    vad_prev_is_speech: bool,
-    /// 静音开始时刻
-    silence_start: Option<Instant>,
-    /// 当前语音段开始时刻
-    last_speech_start: Option<Instant>,
-    /// 截至当前语音段开始前已累计的语音时长（ms）
-    cumulative_speech_ms: u64,
 }
 
 impl StreamingPipeline {
@@ -125,13 +116,9 @@ impl StreamingPipeline {
             asr_stream: None,
             pipeline_state: PipelineState::Idle,
             speech_start_time: None,
+            asr_endpoint_grace_remaining: 0,
             total_frames: 0,
             asr_frames: 0,
-            pause_markers: Vec::new(),
-            vad_prev_is_speech: false,
-            silence_start: None,
-            last_speech_start: None,
-            cumulative_speech_ms: 0,
         })
     }
 
@@ -248,14 +235,30 @@ impl StreamingPipeline {
                     stream.decode(&self.asr_recognizer);
                 }
 
-                // 使用 EndpointDetector 检查 ASR 端点
-                let asr_endpoint = stream.is_endpoint(&self.asr_recognizer);
-                let asr_result = self.endpoint_detector.process_asr_endpoint(asr_endpoint);
+                if self.asr_endpoint_grace_remaining > 0 {
+                    // 处于 ASR endpoint 缓冲期：继续喂音频，倒计时
+                    self.asr_endpoint_grace_remaining -= 1;
+                    if self.asr_endpoint_grace_remaining == 0 {
+                        // 缓冲期结束：刷新并提交
+                        stream.input_finished();
+                        self.pipeline_state = PipelineState::Completed;
+                        tracing::info!("Pipeline: ASR 端点缓冲期结束，准备上屏");
+                    } else {
+                        // 缓冲期内继续喂音频（已在上方的 Recognizing 分支处理）
+                        tracing::debug!("Pipeline: ASR 端点缓冲期剩余 {} 帧", self.asr_endpoint_grace_remaining);
+                    }
+                } else {
+                    // 正常检查 ASR 端点（只在缓冲期外检查，避免重复触发）
+                    let asr_endpoint = stream.is_endpoint(&self.asr_recognizer);
+                    let asr_result = self.endpoint_detector.process_asr_endpoint(asr_endpoint);
 
-                if asr_result == EndpointResult::Detected {
-                    tracing::info!("Pipeline: ASR 端点检测完成");
-                    stream.input_finished();
-                    self.pipeline_state = PipelineState::Completed;
+                    if asr_result == EndpointResult::Detected {
+                        // 启动 5 帧（约 160ms）缓冲期，让 Paraformer 完成末字解码
+                        const GRACE_FRAMES: u32 = 5;
+                        tracing::info!("Pipeline: ASR 端点检测完成，等待 {}ms 缓冲期以确保末字完整",
+                            GRACE_FRAMES * 32);
+                        self.asr_endpoint_grace_remaining = GRACE_FRAMES;
+                    }
                 }
             }
         }
@@ -266,48 +269,6 @@ impl StreamingPipeline {
         } else {
             String::new()
         };
-
-        // 5.5 VAD 停顿追踪（用于最终逗号插入）
-        // Paraformer 模型流式结果可能延迟，不能依赖 partial_result 字符数
-        // 改用语音时间比例：记录每次停顿前已说了多少毫秒语音
-        if self.pipeline_state == PipelineState::Recognizing {
-            let is_speech = matches!(
-                vad_result.state,
-                VadState::Speech | VadState::SpeechCandidate
-            );
-
-            if is_speech && self.last_speech_start.is_none() && self.silence_start.is_none() {
-                // 首次进入语音状态（pipeline 刚进入 Recognizing）
-                self.last_speech_start = Some(now);
-                tracing::debug!("🎤 语音段开始计时");
-            } else if self.vad_prev_is_speech && !is_speech {
-                // 语音 → 静音：记录本语音段时长，启动静音计时
-                if let Some(seg_start) = self.last_speech_start.take() {
-                    let seg_ms = seg_start.elapsed().as_millis() as u64;
-                    self.cumulative_speech_ms += seg_ms;
-                    tracing::debug!("⏸  语音段结束: +{}ms，累计语音 {}ms",
-                        seg_ms, self.cumulative_speech_ms);
-                }
-                self.silence_start = Some(now);
-            } else if !self.vad_prev_is_speech && is_speech {
-                // 静音 → 语音：计算停顿时长，满足阈值则记录停顿标记
-                if let Some(t) = self.silence_start.take() {
-                    let duration_ms = t.elapsed().as_millis() as u64;
-                    if duration_ms >= 250 {
-                        tracing::info!("🎯 VAD 停顿: {}ms，停顿前已有 {}ms 语音",
-                            duration_ms, self.cumulative_speech_ms);
-                        self.pause_markers.push((self.cumulative_speech_ms, duration_ms));
-                    } else {
-                        tracing::debug!("  静音 {}ms < 250ms，不计为停顿", duration_ms);
-                    }
-                }
-                // 开始新的语音段计时
-                self.last_speech_start = Some(now);
-                tracing::debug!("▶️  新语音段开始计时");
-            }
-
-            self.vad_prev_is_speech = is_speech;
-        }
 
         let is_final = self.pipeline_state == PipelineState::Completed;
 
@@ -373,11 +334,7 @@ impl StreamingPipeline {
         // 重置状态
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
-        self.pause_markers.clear();
-        self.vad_prev_is_speech = false;
-        self.silence_start = None;
-        self.last_speech_start = None;
-        self.cumulative_speech_ms = 0;
+        self.asr_endpoint_grace_remaining = 0;
 
         Ok(())
     }
@@ -512,9 +469,9 @@ impl StreamingPipeline {
                 tracing::warn!("⚠️  识别结果为空（text 为空字符串）");
                 String::new()
             } else {
-                // 打印所有 Token 信息
+                // 打印所有 Token 信息（INFO 级别，帮助分析断句）
                 for (i, token) in detailed_result.tokens.iter().enumerate() {
-                    tracing::debug!("  Token[{}]: '{}' ({}ms - {}ms, duration={}ms)",
+                    tracing::info!("  Token[{}]: '{}' ({}ms - {}ms, duration={}ms)",
                         i, token.text, token.start_time_ms, token.end_time_ms, token.duration_ms());
                 }
 
@@ -531,7 +488,7 @@ impl StreamingPipeline {
                     if word.is_empty() || word == "NE" {
                         continue;
                     }
-                    // 检查逻辑连接词规则（不依赖时间戳，始终有效）
+                    // 检查逻辑连接词规则（在词【前】插入逗号，不依赖时间戳，始终有效）
                     let is_logic_word = crate::punctuation::rules::RuleLayer::is_logic_word(&word);
                     if is_logic_word && token_char_count >= 8 {
                         logic_comma_positions.push(token_char_count);
@@ -540,42 +497,11 @@ impl StreamingPipeline {
                     token_char_count += word.chars().count();
                 }
 
-                tracing::info!("📝 纯文本: '{}', VAD停顿标记: {:?}, 逻辑词逗号位置: {:?}",
-                    plain_text, self.pause_markers, logic_comma_positions);
+                tracing::info!("📝 纯文本: '{}', 逻辑词逗号位置: {:?}",
+                    plain_text, logic_comma_positions);
 
-                // 第二步：计算总语音时长
-                // 若 last_speech_start 还有值，说明最后一语音段没有完整结束（手动停止时可能）
-                let mut total_speech_ms = self.cumulative_speech_ms;
-                if let Some(seg_start) = self.last_speech_start {
-                    total_speech_ms += seg_start.elapsed().as_millis() as u64;
-                }
-                tracing::info!("⏱  总语音时长: {}ms，停顿标记数: {}", total_speech_ms, self.pause_markers.len());
-
-                // 第三步：合并所有逗号插入位置（VAD停顿 + 逻辑连接词）
-                // VAD 停顿：使用语音时间比例映射到字符位置
-                let total_chars = plain_text.chars().count();
-                let mut comma_positions: Vec<usize> = Vec::new();
-
-                if total_speech_ms > 0 && total_chars > 0 {
-                    for (speech_ms_before, pause_ms) in &self.pause_markers {
-                        if *pause_ms < 250 {
-                            continue;
-                        }
-                        // 用时间比例计算字符位置
-                        let ratio = (*speech_ms_before as f64) / (total_speech_ms as f64);
-                        let pos = (ratio * total_chars as f64).round() as usize;
-                        let pos = pos.min(total_chars.saturating_sub(1));
-                        if pos > 0 {
-                            tracing::info!("  🗂  停顿 {}ms: 语音比例 {:.2} → 字符位置 {}",
-                                pause_ms, ratio, pos);
-                            comma_positions.push(pos);
-                        } else {
-                            tracing::info!("  ⏭  停顿 {}ms: 计算位置为 0，跳过", pause_ms);
-                        }
-                    }
-                }
-                // 加入逻辑连接词位置
-                comma_positions.extend(logic_comma_positions.iter().copied());
+                // 第二步：将逻辑连接词逗号位置插入纯文本
+                let mut comma_positions = logic_comma_positions;
                 comma_positions.sort_unstable();
                 comma_positions.dedup();
 
@@ -606,7 +532,9 @@ impl StreamingPipeline {
                 let energy_rising = self.endpoint_detector.analyze_energy_trend();
 
                 // 获取语音持续时间用于标点决策
-                let speech_duration_ms = self.endpoint_detector.speech_duration().as_millis() as u64;
+                // ⚠️  用 asr_frames × 32ms 而非墙上时钟
+                //     理由：快速处理（测试回放）时墙上时钟远短于实际音频时长
+                let speech_duration_ms = self.asr_frames * 32;
 
                 tracing::debug!("🔚 准备添加句尾标点: speech_duration_ms={}, energy_rising={}",
                     speech_duration_ms, energy_rising);
@@ -618,12 +546,16 @@ impl StreamingPipeline {
                 }
 
                 // 添加句尾标点
-                let ending = self.punctuation_engine.finalize_sentence(
+                // 用 determine_ending(final_text) 而非 finalize_sentence()
+                // 原因：finalize_sentence 依赖 current_sentence（由 process_token 填充），
+                //       但当前流程直接构建 final_text，current_sentence 始终为空
+                let ending = self.punctuation_engine.determine_ending(
+                    &final_text,
                     speech_duration_ms,
                     energy_rising,
                 );
 
-                tracing::debug!("  句尾标点: '{}'", ending);
+                tracing::info!("  句尾标点: '{}'（基于文本: '{}'）", ending, final_text);
                 final_text.push_str(&ending);
 
                 tracing::info!("✅ 标点处理完成: '{}'", final_text);

@@ -116,6 +116,19 @@ impl PunctuationEngine {
         "".to_string()
     }
 
+    /// 根据给定文本决定句尾标点（不依赖内部 current_sentence 状态）
+    ///
+    /// 用于 `get_final_result_with_punctuation()` 等已自行构建文本的场景
+    pub fn determine_ending(&self, text: &str, speech_duration_ms: u64, energy_rising: bool) -> String {
+        if self.rule_layer.should_end_with_question(text, energy_rising) {
+            return "？".to_string();
+        }
+        if self.rule_layer.should_insert_period(text, speech_duration_ms) {
+            return "。".to_string();
+        }
+        "".to_string()
+    }
+
     /// 重置句子状态（用于新的 VAD 段）
     pub fn reset_sentence(&mut self) {
         self.current_sentence.clear();

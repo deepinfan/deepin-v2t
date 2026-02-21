@@ -50,6 +50,10 @@ pub enum VADState {
 }
 
 /// Silero VAD 检测器 (Phase 1: 完整 ONNX 推理)
+///
+/// Silero VAD v6.2 接口（经 ONNX 解析确认）：
+/// - Inputs:  input[f32, (batch, seq)], state[f32, (2, batch, 128)], sr[int64, scalar]
+/// - Outputs: output[f32, (batch, 1)], stateN[f32, (2, batch, 128)]
 pub struct SileroVAD {
     config: SileroVADConfig,
     state: VADState,
@@ -57,11 +61,11 @@ pub struct SileroVAD {
     silence_frames: u32,
     // ONNX Runtime session
     session: Session,
-    // LSTM hidden states (batch=1, hidden=64)
-    h: Vec<f32>,
-    c: Vec<f32>,
-    // Sample rate state for reset
-    sr: Vec<i64>,
+    /// LSTM state tensor: shape [2, 1, 128] = 256 elements
+    /// 对应模型输入/输出名 "state" / "stateN"
+    lstm_state: Vec<f32>,
+    /// 采样率（int64 scalar），传给模型的 "sr" 输入
+    sr: i64,
 }
 
 impl SileroVAD {
@@ -108,12 +112,17 @@ impl SileroVAD {
             .commit_from_memory(&model_bytes)
             .map_err(|e| VInputError::VadModelLoad(format!("Failed to load model: {}", e)))?;
 
-        tracing::debug!("ONNX session created successfully");
+        // 记录模型输入/输出信息，帮助验证输入顺序
+        for (i, input) in session.inputs().iter().enumerate() {
+            tracing::info!("Silero 模型 input[{}]: name='{}'", i, input.name());
+        }
+        for (i, output) in session.outputs().iter().enumerate() {
+            tracing::info!("Silero 模型 output[{}]: name='{}'", i, output.name());
+        }
 
-        // 初始化 LSTM 隐藏状态 (batch=1, hidden=64)
-        let h = vec![0.0f32; 2 * 64]; // 2 layers * 64 hidden
-        let c = vec![0.0f32; 2 * 64]; // 2 layers * 64 hidden
-        let sr = vec![config.sample_rate as i64];
+        // state: [2, 1, 128] = 256 elements（合并的 LSTM 状态）
+        let lstm_state = vec![0.0f32; 2 * 1 * 128];
+        let sr = config.sample_rate as i64;
 
         Ok(Self {
             config,
@@ -121,8 +130,7 @@ impl SileroVAD {
             speech_frames: 0,
             silence_frames: 0,
             session,
-            h,
-            c,
+            lstm_state,
             sr,
         })
     }
@@ -156,33 +164,29 @@ impl SileroVAD {
         }
 
         // 准备输入张量
+        // 顺序（经 ONNX 解析确认）：input, state, sr
         use ort::inputs;
 
-        // Input: (batch=1, time=samples.len())
-        let input_tensor = Value::from_array((vec![1, samples.len()], samples.to_vec()))
+        // input: [1, T] f32
+        let input_tensor = Value::from_array((vec![1usize, samples.len()], samples.to_vec()))
             .map_err(|e| VInputError::VadInference(format!("Failed to create input tensor: {}", e)))?;
 
-        // H: (2, 1, 64) - 2 layers, batch=1, hidden=64
-        let h_tensor = Value::from_array((vec![2, 1, 64], self.h.clone()))
-            .map_err(|e| VInputError::VadInference(format!("Failed to create h tensor: {}", e)))?;
+        // state: [2, 1, 128] f32
+        let state_tensor = Value::from_array((vec![2usize, 1, 128], self.lstm_state.clone()))
+            .map_err(|e| VInputError::VadInference(format!("Failed to create state tensor: {}", e)))?;
 
-        // C: (2, 1, 64)
-        let c_tensor = Value::from_array((vec![2, 1, 64], self.c.clone()))
-            .map_err(|e| VInputError::VadInference(format!("Failed to create c tensor: {}", e)))?;
-
-        // SR: (1,)
-        let sr_tensor = Value::from_array((vec![1], self.sr.clone()))
+        // sr: int64 [1]（ort v2 不支持真正的 0 维张量，用 shape [1] 代替）
+        let sr_tensor = Value::from_array((vec![1usize], vec![self.sr]))
             .map_err(|e| VInputError::VadInference(format!("Failed to create sr tensor: {}", e)))?;
 
-        // 执行推理
+        // 执行推理（顺序：input, state, sr）
         let outputs = self.session
-            .run(inputs![input_tensor, sr_tensor, h_tensor, c_tensor])
+            .run(inputs![input_tensor, state_tensor, sr_tensor])
             .map_err(|e| VInputError::VadInference(format!("Inference failed: {}", e)))?;
 
         // 提取输出
-        // outputs[0]: speech probability (batch=1, time=1)
-        // outputs[1]: new h state (2, 1, 64)
-        // outputs[2]: new c state (2, 1, 64)
+        // outputs[0]: "output"  [batch, 1] f32 → speech probability
+        // outputs[1]: "stateN"  [2, batch, 128] f32 → updated state
 
         let speech_prob_tensor = &outputs[0];
         let (_shape, speech_prob_data) = speech_prob_tensor
@@ -190,18 +194,12 @@ impl SileroVAD {
             .map_err(|e| VInputError::VadInference(format!("Failed to extract speech prob: {}", e)))?;
         let speech_prob = speech_prob_data[0];
 
-        // 更新隐藏状态
-        let new_h_tensor = &outputs[1];
-        let (_h_shape, new_h_slice) = new_h_tensor
+        // 更新 LSTM state
+        let new_state_tensor = &outputs[1];
+        let (_state_shape, new_state_slice) = new_state_tensor
             .try_extract_tensor::<f32>()
-            .map_err(|e| VInputError::VadInference(format!("Failed to extract h state: {}", e)))?;
-        self.h.copy_from_slice(new_h_slice);
-
-        let new_c_tensor = &outputs[2];
-        let (_c_shape, new_c_slice) = new_c_tensor
-            .try_extract_tensor::<f32>()
-            .map_err(|e| VInputError::VadInference(format!("Failed to extract c state: {}", e)))?;
-        self.c.copy_from_slice(new_c_slice);
+            .map_err(|e| VInputError::VadInference(format!("Failed to extract stateN: {}", e)))?;
+        self.lstm_state.copy_from_slice(new_state_slice);
 
         tracing::trace!("VAD inference: prob={:.3}", speech_prob);
 
@@ -268,10 +266,9 @@ impl SileroVAD {
         self.state = VADState::Silence;
         self.speech_frames = 0;
         self.silence_frames = 0;
-        // 重置 LSTM 隐藏状态
-        self.h.fill(0.0);
-        self.c.fill(0.0);
-        tracing::debug!("VAD reset (including LSTM states)");
+        // 重置 LSTM state
+        self.lstm_state.fill(0.0);
+        tracing::debug!("VAD reset (including LSTM state)");
     }
 
     /// 获取当前状态

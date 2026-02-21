@@ -52,3 +52,4 @@ cbindgen = "0.28"
 hound = "3.5"  # WAV 文件读写
 ctrlc = "3.4"  # Ctrl+C 信号处理
 tempfile = "3.13"  # 临时文件（用于测试）
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }  # E2E 测试日志

@@ -41,20 +41,20 @@ pub struct EndpointDetectorConfig {
 
 fn default_min_speech_ms() -> u64 { 300 }
 fn default_max_speech_ms() -> u64 { 30_000 }
-fn default_trailing_silence_ms() -> u64 { 1000 }  // 增加到 1000ms（原 800ms）
+fn default_trailing_silence_ms() -> u64 { 600 }
 fn default_force_timeout_ms() -> u64 { 60_000 }
 fn default_true() -> bool { true }
-fn default_vad_silence_frames() -> usize { 8 }  // 增加到 8 帧（原 5 帧）约 256ms
+fn default_vad_silence_frames() -> usize { 5 }  // 5 帧 × 32ms = 160ms
 
 impl Default for EndpointDetectorConfig {
     fn default() -> Self {
         Self {
             min_speech_duration_ms: 300,        // 300ms 最小语音
             max_speech_duration_ms: 30_000,     // 30s 最大语音（自动分段）
-            trailing_silence_ms: 1000,          // 1000ms 尾部静音（增加）
+            trailing_silence_ms: 600,           // 600ms 尾部静音
             force_timeout_ms: 60_000,           // 60s 强制超时
             vad_assisted: true,                 // 启用 VAD 辅助
-            vad_silence_confirm_frames: 8,      // 8 帧静音确认（约 256ms @ 32ms/frame）
+            vad_silence_confirm_frames: 5,      // 5 帧静音确认（约 160ms @ 32ms/frame）
         }
     }
 }
@@ -165,9 +165,12 @@ impl EndpointDetector {
             DetectorState::WaitingForSpeech => {
                 if is_speech && self.consecutive_speech_frames >= 2 {
                     // 连续 2 帧语音，确认语音开始
+                    // 同时重置 session_start_time，避免应用启动超过 force_timeout_ms 后
+                    // 每次录音都立即触发强制超时
                     self.state = DetectorState::SpeechDetected;
                     self.speech_start_time = Some(Instant::now());
-                    tracing::debug!("端点检测: 语音开始");
+                    self.session_start_time = Instant::now();
+                    tracing::info!("端点检测: 语音开始");
                 }
                 EndpointResult::Continue
             }
@@ -195,7 +198,8 @@ impl EndpointDetector {
                     // 进入尾部静音确认阶段
                     self.state = DetectorState::TrailingSilence;
                     self.silence_start_time = Some(Instant::now());
-                    tracing::debug!("端点检测: 进入尾部静音阶段");
+                    tracing::info!("端点检测: 进入尾部静音阶段 (连续静音帧: {})",
+                        self.consecutive_silence_frames);
                 }
 
                 EndpointResult::Continue
@@ -208,7 +212,7 @@ impl EndpointDetector {
 
                 // 如果重新检测到语音，返回语音状态
                 if is_speech && self.consecutive_speech_frames >= 2 {
-                    tracing::debug!("端点检测: 重新检测到语音，继续");
+                    tracing::info!("端点检测: 重新检测到语音，继续");
                     self.state = DetectorState::SpeechDetected;
                     self.silence_start_time = None;
                     return EndpointResult::Continue;
@@ -251,39 +255,25 @@ impl EndpointDetector {
             return EndpointResult::Continue;
         }
 
-        // ASR 检测到端点：只在 TrailingSilence 阶段处理，避免中途停顿被误判为句末
-        // 原因：ASR 模型可能在说话中间的自然停顿时触发端点，
-        //       但只有经过 VAD 确认的尾部静音（TrailingSilence）才是真正的句末
-        if self.state != DetectorState::TrailingSilence {
-            tracing::debug!("端点检测: ASR 端点但非 TrailingSilence 阶段（当前: {:?}），忽略",
-                self.state);
+        // 检查语音已开始（不在等待状态）
+        if self.state == DetectorState::WaitingForSpeech {
+            tracing::debug!("端点检测: ASR 端点但尚未检测到语音，忽略");
             return EndpointResult::Continue;
         }
 
-        // 检查尾部静音已持续足够长（至少 trailing_silence_ms / 2）
-        let silence_duration = self.silence_start_time
-            .map(|t| t.elapsed())
-            .unwrap_or(Duration::ZERO);
-        let min_silence = self.config.trailing_silence_ms / 2;
-        if (silence_duration.as_millis() as u64) < min_silence {
-            tracing::debug!("端点检测: ASR 端点但 TrailingSilence 尚短 ({}ms < {}ms)，继续等待",
-                silence_duration.as_millis(), min_silence);
-            return EndpointResult::Continue;
-        }
-
-        // ASR 检测到端点
+        // 检查最小语音长度
         let speech_duration = self.speech_start_time
             .map(|t| t.elapsed())
             .unwrap_or(Duration::ZERO);
-
-        // 检查最小语音长度
         if (speech_duration.as_millis() as u64) < self.config.min_speech_duration_ms {
-            tracing::debug!("端点检测: ASR 端点但语音过短，忽略");
+            tracing::debug!("端点检测: ASR 端点但语音过短 ({}ms < {}ms)，忽略",
+                speech_duration.as_millis(), self.config.min_speech_duration_ms);
             return EndpointResult::Continue;
         }
 
-        tracing::info!("端点检测: ASR 检测到端点 (语音: {}ms, 静音: {}ms)",
-            speech_duration.as_millis(), silence_duration.as_millis());
+        // Sherpa-ONNX 的 rule2 (1.2s 无新 token) 已经提供了足够的静音确认。
+        // 不依赖 VAD 静音帧计数（在高噪声环境下 VAD 无法检测静音）。
+        tracing::info!("端点检测: ASR 检测到端点 (语音: {}ms)", speech_duration.as_millis());
         EndpointResult::Detected
     }
 
