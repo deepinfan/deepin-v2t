@@ -102,33 +102,36 @@ impl PauseEngine {
             }
         }
 
-        // Sherpa-ONNX 的 timestamps 是连续的，Token 之间没有间隙
-        // 停顿包含在上一个 Token 的时长中
-        // 因此我们检测上一个 Token 的时长是否异常长
         if let Some(last_token) = self.token_history.last() {
+            // 方法1：检查相邻 Token 时间间隙
+            // sherpa-onnx 的停顿更可靠地体现在 end_ms → start_ms 的空白上
+            let gap_ms = token.start_ms.saturating_sub(last_token.end_ms);
+            if gap_ms >= 200 {
+                tracing::debug!("  🎯 停顿检测(间隙法): '{}' 前有 {}ms 间隙 >= 200ms，插入逗号",
+                    token.text, gap_ms);
+                return true;
+            }
+
+            // 方法2：检查上一个 Token 时长比例（timestamps 连续时的备用方法）
+            // Sherpa-ONNX 的 timestamps 连续时，停顿包含在上一个 Token 的时长中
             let last_token_duration = last_token.duration_ms();
 
-            // ✅ 检查最小时长（避免误判短 Token 包含停顿）
             if last_token_duration < self.profile.min_pause_duration_ms {
                 tracing::debug!("    ⏭  上一Token '{}' 时长 {}ms < 最小停顿阈值 {}ms，不检测停顿",
                     last_token.text, last_token_duration, self.profile.min_pause_duration_ms);
                 return false;
             }
 
-            // 计算平均 token 时长
             let avg_duration = self.calculate_avg_token_duration();
             if avg_duration == 0 {
                 return false;
             }
 
-            // 计算时长比例（上一个 Token 的时长 / 平均时长）
             let duration_ratio = last_token_duration as f32 / avg_duration as f32;
 
-            tracing::debug!("    ⏱  停顿检测: 上一Token='{}' 时长={}ms, 平均={}ms, 比例={:.2}, 阈值={:.2}",
+            tracing::debug!("    ⏱  停顿检测(时长法): 上一Token='{}' 时长={}ms, 平均={}ms, 比例={:.2}, 阈值={:.2}",
                 last_token.text, last_token_duration, avg_duration, duration_ratio, self.profile.streaming_pause_ratio);
 
-            // 如果上一个 Token 的时长显著超过平均值，说明包含了停顿
-            // 在当前 Token 前插入逗号
             return duration_ratio > self.profile.streaming_pause_ratio;
         }
 

@@ -99,7 +99,6 @@ impl ChineseNumberConverter {
 
         let mut result = 0i64;
         let mut current = 0i64;
-        let mut last_unit = 0u32; // 记录上一个单位的大小
 
         for ch in text.chars() {
             match ch {
@@ -126,7 +125,6 @@ impl ChineseNumberConverter {
                     current *= 10;
                     result += current;
                     current = 0;
-                    last_unit = 10;
                 }
                 '百' => {
                     if current == 0 {
@@ -137,7 +135,6 @@ impl ChineseNumberConverter {
                     current *= 100;
                     result += current;
                     current = 0;
-                    last_unit = 100;
                 }
                 '千' => {
                     if current == 0 {
@@ -148,7 +145,6 @@ impl ChineseNumberConverter {
                     current *= 1000;
                     result += current;
                     current = 0;
-                    last_unit = 1000;
                 }
 
                 // 大单位：万、亿
@@ -158,7 +154,6 @@ impl ChineseNumberConverter {
                     }
                     result *= 10000;
                     current = 0;
-                    last_unit = 10000;
                 }
                 '亿' => {
                     if current > 0 {
@@ -166,7 +161,6 @@ impl ChineseNumberConverter {
                     }
                     result *= 100000000;
                     current = 0;
-                    last_unit = 100000000;
                 }
 
                 _ => {

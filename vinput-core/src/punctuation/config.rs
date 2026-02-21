@@ -64,10 +64,10 @@ impl StyleProfile {
     /// - 问号需严格匹配
     fn professional_preset() -> Self {
         Self {
-            streaming_pause_ratio: 2.5,  // 降低阈值以适应实际停顿检测
-            streaming_min_tokens: 6,
-            min_tokens_between_commas: 4,
-            min_pause_duration_ms: 500,
+            streaming_pause_ratio: 1.8,  // 降低阈值，更容易检测到停顿（原 2.5 太高）
+            streaming_min_tokens: 5,     // 降低最小 token 数，更早开始检测（原 6）
+            min_tokens_between_commas: 3, // 降低逗号间隔，允许更密集的逗号（原 4）
+            min_pause_duration_ms: 400,  // 降低最小停顿时长（原 500ms）
             allow_exclamation: false,
             question_strict_mode: true,
             logic_word_strength: 0.8,
@@ -83,10 +83,10 @@ impl StyleProfile {
     /// - 问号检测宽松
     fn balanced_preset() -> Self {
         Self {
-            streaming_pause_ratio: 2.8,
+            streaming_pause_ratio: 1.6,  // 更敏感的停顿检测（原 2.8）
             streaming_min_tokens: 4,
             min_tokens_between_commas: 3,
-            min_pause_duration_ms: 400,
+            min_pause_duration_ms: 350,  // 更短的最小停顿（原 400ms）
             allow_exclamation: false,
             question_strict_mode: false,
             logic_word_strength: 1.0,
@@ -103,7 +103,7 @@ impl StyleProfile {
     /// - 标点丰富
     fn expressive_preset() -> Self {
         Self {
-            streaming_pause_ratio: 2.2,
+            streaming_pause_ratio: 1.5,  // 最敏感的停顿检测（原 2.2）
             streaming_min_tokens: 3,
             min_tokens_between_commas: 2,
             min_pause_duration_ms: 300,
@@ -128,8 +128,8 @@ mod tests {
     #[test]
     fn test_professional_profile() {
         let profile = StyleProfile::professional_preset();
-        assert_eq!(profile.streaming_pause_ratio, 2.5);
-        assert_eq!(profile.streaming_min_tokens, 6);
+        assert_eq!(profile.streaming_pause_ratio, 1.8);
+        assert_eq!(profile.streaming_min_tokens, 5);
         assert!(!profile.allow_exclamation);
         assert!(profile.question_strict_mode);
     }
@@ -137,14 +137,14 @@ mod tests {
     #[test]
     fn test_balanced_profile() {
         let profile = StyleProfile::balanced_preset();
-        assert_eq!(profile.streaming_pause_ratio, 2.8);
+        assert_eq!(profile.streaming_pause_ratio, 1.6);
         assert_eq!(profile.streaming_min_tokens, 4);
     }
 
     #[test]
     fn test_expressive_profile() {
         let profile = StyleProfile::expressive_preset();
-        assert_eq!(profile.streaming_pause_ratio, 2.2);
+        assert_eq!(profile.streaming_pause_ratio, 1.5);
         assert!(profile.allow_exclamation);
     }
 

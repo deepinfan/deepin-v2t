@@ -84,6 +84,19 @@ pub struct StreamingPipeline {
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
+
+    // --- VAD 停顿追踪（用于逗号插入）---
+    /// 记录的停顿事件：(停顿前累计语音时长ms, 停顿时长ms)
+    /// 使用语音时间比例而非字符数，避免 Paraformer 流式结果延迟问题
+    pause_markers: Vec<(u64, u64)>,
+    /// 上一帧是否为语音状态
+    vad_prev_is_speech: bool,
+    /// 静音开始时刻
+    silence_start: Option<Instant>,
+    /// 当前语音段开始时刻
+    last_speech_start: Option<Instant>,
+    /// 截至当前语音段开始前已累计的语音时长（ms）
+    cumulative_speech_ms: u64,
 }
 
 impl StreamingPipeline {
@@ -114,6 +127,11 @@ impl StreamingPipeline {
             speech_start_time: None,
             total_frames: 0,
             asr_frames: 0,
+            pause_markers: Vec::new(),
+            vad_prev_is_speech: false,
+            silence_start: None,
+            last_speech_start: None,
+            cumulative_speech_ms: 0,
         })
     }
 
@@ -249,6 +267,48 @@ impl StreamingPipeline {
             String::new()
         };
 
+        // 5.5 VAD 停顿追踪（用于最终逗号插入）
+        // Paraformer 模型流式结果可能延迟，不能依赖 partial_result 字符数
+        // 改用语音时间比例：记录每次停顿前已说了多少毫秒语音
+        if self.pipeline_state == PipelineState::Recognizing {
+            let is_speech = matches!(
+                vad_result.state,
+                VadState::Speech | VadState::SpeechCandidate
+            );
+
+            if is_speech && self.last_speech_start.is_none() && self.silence_start.is_none() {
+                // 首次进入语音状态（pipeline 刚进入 Recognizing）
+                self.last_speech_start = Some(now);
+                tracing::debug!("🎤 语音段开始计时");
+            } else if self.vad_prev_is_speech && !is_speech {
+                // 语音 → 静音：记录本语音段时长，启动静音计时
+                if let Some(seg_start) = self.last_speech_start.take() {
+                    let seg_ms = seg_start.elapsed().as_millis() as u64;
+                    self.cumulative_speech_ms += seg_ms;
+                    tracing::debug!("⏸  语音段结束: +{}ms，累计语音 {}ms",
+                        seg_ms, self.cumulative_speech_ms);
+                }
+                self.silence_start = Some(now);
+            } else if !self.vad_prev_is_speech && is_speech {
+                // 静音 → 语音：计算停顿时长，满足阈值则记录停顿标记
+                if let Some(t) = self.silence_start.take() {
+                    let duration_ms = t.elapsed().as_millis() as u64;
+                    if duration_ms >= 250 {
+                        tracing::info!("🎯 VAD 停顿: {}ms，停顿前已有 {}ms 语音",
+                            duration_ms, self.cumulative_speech_ms);
+                        self.pause_markers.push((self.cumulative_speech_ms, duration_ms));
+                    } else {
+                        tracing::debug!("  静音 {}ms < 250ms，不计为停顿", duration_ms);
+                    }
+                }
+                // 开始新的语音段计时
+                self.last_speech_start = Some(now);
+                tracing::debug!("▶️  新语音段开始计时");
+            }
+
+            self.vad_prev_is_speech = is_speech;
+        }
+
         let is_final = self.pipeline_state == PipelineState::Completed;
 
         let duration_ms = self.speech_start_time
@@ -313,6 +373,11 @@ impl StreamingPipeline {
         // 重置状态
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
+        self.pause_markers.clear();
+        self.vad_prev_is_speech = false;
+        self.silence_start = None;
+        self.last_speech_start = None;
+        self.cumulative_speech_ms = 0;
 
         Ok(())
     }
@@ -418,6 +483,21 @@ impl StreamingPipeline {
     ///
     /// 调用此方法后会自动重置管道状态
     pub fn get_final_result_with_punctuation(&mut self) -> String {
+        // 通知解码器输入已结束，触发最终 beam search 完成
+        // 对于轻声末字：ASR 缓冲区里有这些帧，但未经 input_finished() 就无法提交
+        if let Some(stream) = &mut self.asr_stream {
+            tracing::info!("🔚 调用 input_finished()，刷新 ASR 解码器缓冲区");
+            stream.input_finished();
+        }
+
+        // 最终一次解码，处理 input_finished() 后的剩余帧
+        if let Some(stream) = &mut self.asr_stream {
+            if stream.is_ready(&self.asr_recognizer) {
+                stream.decode(&self.asr_recognizer);
+                tracing::info!("🔚 最终解码完成");
+            }
+        }
+
         let result = if let Some(stream) = &self.asr_stream {
             // 获取详细结果（包含 Token 和时间戳）
             let detailed_result = stream.get_detailed_result(&self.asr_recognizer);
@@ -438,21 +518,89 @@ impl StreamingPipeline {
                         i, token.text, token.start_time_ms, token.end_time_ms, token.duration_ms());
                 }
 
-                // 处理每个 Token，添加标点
-                let mut final_text = String::new();
+                // 第一步：构建纯文本（无逗号），同时收集逻辑连接词的逗号位置
+                // PauseEngine 的时间戳方法对 Paraformer 模型无效，跳过停顿检测
+                // 只保留 RuleLayer 的逻辑连接词逗号（如"因为"、"所以"）
+                let mut plain_text = String::new();
+                let mut logic_comma_positions: Vec<usize> = Vec::new(); // 逻辑词前的字符位置
+                let mut token_char_count = 0usize;
 
                 for token in &detailed_result.tokens {
-                    // 转换为 TokenInfo
                     let token_info = token.to_token_info();
+                    let word = token_info.text.trim().to_string();
+                    if word.is_empty() || word == "NE" {
+                        continue;
+                    }
+                    // 检查逻辑连接词规则（不依赖时间戳，始终有效）
+                    let is_logic_word = crate::punctuation::rules::RuleLayer::is_logic_word(&word);
+                    if is_logic_word && token_char_count >= 8 {
+                        logic_comma_positions.push(token_char_count);
+                    }
+                    plain_text.push_str(&word);
+                    token_char_count += word.chars().count();
+                }
 
-                    // 处理 Token（可能在前面添加逗号）
-                    if let Some(processed_token) = self.punctuation_engine.process_token(token_info) {
-                        tracing::debug!("  处理 Token: '{}' -> '{}'", token.text, processed_token);
-                        final_text.push_str(&processed_token);
-                    } else {
-                        tracing::debug!("  Token 被过滤: '{}'", token.text);
+                tracing::info!("📝 纯文本: '{}', VAD停顿标记: {:?}, 逻辑词逗号位置: {:?}",
+                    plain_text, self.pause_markers, logic_comma_positions);
+
+                // 第二步：计算总语音时长
+                // 若 last_speech_start 还有值，说明最后一语音段没有完整结束（手动停止时可能）
+                let mut total_speech_ms = self.cumulative_speech_ms;
+                if let Some(seg_start) = self.last_speech_start {
+                    total_speech_ms += seg_start.elapsed().as_millis() as u64;
+                }
+                tracing::info!("⏱  总语音时长: {}ms，停顿标记数: {}", total_speech_ms, self.pause_markers.len());
+
+                // 第三步：合并所有逗号插入位置（VAD停顿 + 逻辑连接词）
+                // VAD 停顿：使用语音时间比例映射到字符位置
+                let total_chars = plain_text.chars().count();
+                let mut comma_positions: Vec<usize> = Vec::new();
+
+                if total_speech_ms > 0 && total_chars > 0 {
+                    for (speech_ms_before, pause_ms) in &self.pause_markers {
+                        if *pause_ms < 250 {
+                            continue;
+                        }
+                        // 用时间比例计算字符位置
+                        let ratio = (*speech_ms_before as f64) / (total_speech_ms as f64);
+                        let pos = (ratio * total_chars as f64).round() as usize;
+                        let pos = pos.min(total_chars.saturating_sub(1));
+                        if pos > 0 {
+                            tracing::info!("  🗂  停顿 {}ms: 语音比例 {:.2} → 字符位置 {}",
+                                pause_ms, ratio, pos);
+                            comma_positions.push(pos);
+                        } else {
+                            tracing::info!("  ⏭  停顿 {}ms: 计算位置为 0，跳过", pause_ms);
+                        }
                     }
                 }
+                // 加入逻辑连接词位置
+                comma_positions.extend(logic_comma_positions.iter().copied());
+                comma_positions.sort_unstable();
+                comma_positions.dedup();
+
+                // 第四步：将逗号插入到纯文本的对应字符位置
+                const MIN_CHARS_BETWEEN_COMMAS: usize = 3;
+                let mut final_text = String::with_capacity(plain_text.len() + comma_positions.len() * 3);
+                let mut last_comma_at: Option<usize> = None;
+
+                for (i, ch) in plain_text.char_indices().map(|(_, c)| c).enumerate() {
+                    // 检查此位置是否应插入逗号
+                    if i > 0 && comma_positions.contains(&i) {
+                        let ok = match last_comma_at {
+                            None => i >= MIN_CHARS_BETWEEN_COMMAS,
+                            Some(last) => i >= last + MIN_CHARS_BETWEEN_COMMAS,
+                        };
+                        if ok {
+                            tracing::info!("  ✅ 在第 {} 个字符前插入逗号", i);
+                            final_text.push('，');
+                            last_comma_at = Some(i);
+                        }
+                    }
+                    final_text.push(ch);
+                }
+
+                tracing::info!("📝 插入逗号后: '{}'", final_text);
 
                 // 检测 VAD 能量变化（用于问号检测）
                 let energy_rising = self.endpoint_detector.analyze_energy_trend();

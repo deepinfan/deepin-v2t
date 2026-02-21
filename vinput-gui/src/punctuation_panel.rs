@@ -1,6 +1,6 @@
 //! 标点控制面板 GUI
 
-use crate::config::{PunctuationConfig, VInputConfig};
+use crate::config::VInputConfig;
 use eframe::egui;
 
 pub struct PunctuationPanel {

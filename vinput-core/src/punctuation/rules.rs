@@ -11,7 +11,11 @@ const LOGIC_WORDS: &[&str] = &[
 
 /// 问号关键词（严格模式）
 const QUESTION_KEYWORDS: &[&str] = &[
-    "是否", "是不是", "能否", "可以吗", "对吗", "吗",
+    // 疑问语气词
+    "吗", "呢", "么",
+    // 反问/确认
+    "是否", "是不是", "能否", "可以吗", "对吗", "行吗", "好吗",
+    "能不能", "有没有", "会不会", "要不要", "该不该",
 ];
 
 /// 规则层
@@ -56,8 +60,13 @@ impl RuleLayer {
     ///
     /// # 参数
     /// - `sentence`: 句子文本
-    /// - `energy_rising`: 能量是否上扬（声学特征）
+    /// - `energy_rising`: 能量是否上扬（声学特征，PushToTalk 模式下不可靠）
     pub fn should_end_with_question(&self, sentence: &str, energy_rising: bool) -> bool {
+        // 句子长度不足，不判断为问句
+        if sentence.chars().count() < 2 {
+            return false;
+        }
+
         // 检查是否以问号关键词结尾
         let has_question_keyword = QUESTION_KEYWORDS.iter().any(|kw| sentence.ends_with(kw));
 
@@ -65,14 +74,23 @@ impl RuleLayer {
             return false;
         }
 
-        // 严格模式：需要声学特征验证
+        // 严格模式下：
+        // "吗/呢/么" 等单字语气词直接接受（PushToTalk 模式下能量上扬检测不可靠）
+        // 仅对歧义较高的词语（如独立出现的 "吗"）保留能量校验作为辅助
         if self.profile.question_strict_mode {
-            // 如果句子仅以 "吗" 结尾，需要能量上扬
-            if sentence.ends_with("吗") && sentence != "吗" {
-                return energy_rising;
+            // "呢" 在句尾可能是陈述语气，需要额外校验
+            if sentence.ends_with("呢") {
+                // 有明确疑问上下文（句子中含疑问词）则直接接受
+                let has_wh_word = ["什么", "怎么", "哪", "谁", "为什么", "几", "多少"]
+                    .iter()
+                    .any(|w| sentence.contains(w));
+                if has_wh_word || energy_rising {
+                    return true;
+                }
+                return false;
             }
 
-            // 其他问号关键词，接受
+            // 其他关键词（"吗", "是否", "能否" 等）直接接受
             return true;
         }
 
@@ -135,8 +153,8 @@ mod tests {
     fn test_should_end_with_question_strict_mode() {
         let layer = RuleLayer::new(StyleProfile::from_preset("Professional"));
 
-        // 严格模式，有问号关键词但无能量上扬
-        assert!(!layer.should_end_with_question("你好吗", false));
+        // 严格模式，"好吗" 是明确问句关键词，无论能量是否上扬都返回问号
+        assert!(layer.should_end_with_question("你好吗", false));
 
         // 严格模式，有问号关键词且能量上扬
         assert!(layer.should_end_with_question("你好吗", true));

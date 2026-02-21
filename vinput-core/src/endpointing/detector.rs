@@ -412,6 +412,7 @@ mod tests {
         let config = EndpointDetectorConfig {
             min_speech_duration_ms: 300,
             trailing_silence_ms: 100,
+            vad_silence_confirm_frames: 5,  // 5 帧触发静音确认
             ..Default::default()
         };
 

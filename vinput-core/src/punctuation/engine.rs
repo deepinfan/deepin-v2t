@@ -260,12 +260,12 @@ mod tests {
         let mut engine = PunctuationEngine::new(StyleProfile::from_preset("Professional"));
 
         engine.update_profile(StyleProfile::from_preset("Balanced"));
-        assert_eq!(engine.profile().streaming_pause_ratio, 2.8);
+        assert_eq!(engine.profile().streaming_pause_ratio, 1.6);
     }
 
     #[test]
     fn test_default_engine() {
         let engine = PunctuationEngine::default();
-        assert_eq!(engine.profile().streaming_pause_ratio, 2.5);
+        assert_eq!(engine.profile().streaming_pause_ratio, 1.8);
     }
 }

@@ -96,7 +96,7 @@ impl ITNEngine {
     }
 
     /// 处理单个 Block
-    fn process_block(&self, block: &Block, offset: usize) -> Block {
+    fn process_block(&self, block: &Block, _offset: usize) -> Block {
         // Step 3: ContextGuard - 跳过特定上下文
         if ContextGuard::should_skip(block) {
             return block.clone();
@@ -291,7 +291,7 @@ impl ITNEngine {
         }
 
         // 排除常见标点和符号
-        if matches!(ch, '，' | '。' | '！' | '？' | '、' | '；' | '：' | '"' | '"' | '\'' | '（' | '）' | '【' | '】' | '《' | '》') {
+        if matches!(ch, '，' | '。' | '！' | '？' | '、' | '；' | '：' | '"' | '\'' | '（' | '）' | '【' | '】' | '《' | '》') {
             return false;
         }
 

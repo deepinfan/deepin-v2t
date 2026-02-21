@@ -4,21 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
-/// VAD 输入模式
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputMode {
-    /// 按住说话模式（用户控制开始和结束）
-    PushToTalk,
-    /// 自动检测模式（VAD 自动检测语音）
-    AutoDetect,
-}
-
 /// VAD 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
-    /// 输入模式
-    pub mode: InputMode,
-
     /// Silero VAD 配置
     #[serde(default = "default_silero_config")]
     pub silero: SileroConfig,
@@ -164,7 +152,6 @@ impl VadConfig {
     /// PushToTalk 模式的默认配置
     pub fn push_to_talk_default() -> Self {
         Self {
-            mode: InputMode::PushToTalk,
             silero: SileroConfig {
                 model_path: "models/silero-vad/silero_vad.onnx".to_string(),
                 sample_rate: 16000,
@@ -186,40 +173,6 @@ impl VadConfig {
                 enabled: true,
                 duration_ms: 250,
                 capacity: 4000, // 250ms @ 16kHz
-            },
-            transient_filter: TransientFilterConfig {
-                enabled: true,
-                max_duration_ms: 80,
-                rms_threshold: 0.05,
-            },
-        }
-    }
-
-    /// AutoDetect 模式的默认配置
-    pub fn auto_detect_default() -> Self {
-        Self {
-            mode: InputMode::AutoDetect,
-            silero: SileroConfig {
-                model_path: "models/silero-vad/silero_vad.onnx".to_string(),
-                sample_rate: 16000,
-                frame_size: 512,
-            },
-            energy_gate: EnergyGateConfig {
-                enabled: true,
-                noise_multiplier: 3.0, // 更严格，避免误触发
-                baseline_alpha: 0.95,
-                initial_baseline: 0.001,
-            },
-            hysteresis: HysteresisConfig {
-                start_threshold: 0.68, // 更高的启动阈值
-                end_threshold: 0.35,
-                min_speech_duration_ms: 180, // 更长的最小语音时长
-                min_silence_duration_ms: 900, // 更长的静音时长
-            },
-            pre_roll: PreRollConfig {
-                enabled: true,
-                duration_ms: 300, // 更长的 pre-roll
-                capacity: 4800,
             },
             transient_filter: TransientFilterConfig {
                 enabled: true,

@@ -29,18 +29,18 @@ max_words = 10000
 # 标点配置
 [punctuation]
 style = "Professional"
-pause_ratio = 2.0
-min_tokens = 3
-allow_exclamation = false
-question_strict = true
+pause_ratio = 1.8          # 停顿检测阈值（降低以提高逗号检测灵敏度，原 2.0）
+min_tokens = 5             # 开始检测逗号的最小 token 数（原 3）
+allow_exclamation = false  # 是否允许感叹号
+question_strict = true     # 问号严格模式
 
 # VAD 配置
 [vad]
 mode = "PushToTalk"
-start_threshold = 0.5
-end_threshold = 0.3
-min_speech_duration = 250
-min_silence_duration = 300
+start_threshold = 0.7
+end_threshold = 0.35
+min_speech_duration = 100
+min_silence_duration = 700
 
 # ASR 配置
 [asr]
@@ -53,7 +53,7 @@ max_active_paths = 2
 [endpoint]
 min_speech_duration_ms = 300
 max_speech_duration_ms = 30000
-trailing_silence_ms = 800
+trailing_silence_ms = 1000
 force_timeout_ms = 60000
 vad_assisted = true
-vad_silence_confirm_frames = 5
+vad_silence_confirm_frames = 8

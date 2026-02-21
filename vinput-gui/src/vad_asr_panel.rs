@@ -1,11 +1,10 @@
 //! VAD/ASR 参数调整面板 GUI
 
-use crate::config::{AsrConfig, VadConfig, VInputConfig};
+use crate::config::VInputConfig;
 use eframe::egui;
 
 pub struct VadAsrPanel {
     // VAD 配置
-    vad_mode: String,
     start_threshold: f32,
     end_threshold: f32,
     min_speech_duration: u64,
@@ -21,7 +20,6 @@ pub struct VadAsrPanel {
 impl VadAsrPanel {
     pub fn new(config: &VInputConfig) -> Self {
         Self {
-            vad_mode: config.vad.mode.clone(),
             start_threshold: config.vad.start_threshold,
             end_threshold: config.vad.end_threshold,
             min_speech_duration: config.vad.min_speech_duration,
@@ -34,7 +32,6 @@ impl VadAsrPanel {
     }
 
     pub fn apply_to_config(&self, config: &mut VInputConfig) {
-        config.vad.mode = self.vad_mode.clone();
         config.vad.start_threshold = self.start_threshold;
         config.vad.end_threshold = self.end_threshold;
         config.vad.min_speech_duration = self.min_speech_duration;
@@ -60,26 +57,6 @@ impl VadAsrPanel {
         // VAD 配置
         ui.group(|ui| {
             ui.heading("VAD (语音活动检测)");
-
-            ui.horizontal(|ui| {
-                ui.label("VAD 模式:");
-                if ui
-                    .selectable_label(self.vad_mode == "push-to-talk", "Push-to-Talk")
-                    .clicked()
-                {
-                    self.vad_mode = "push-to-talk".to_string();
-                    modified = true;
-                }
-                if ui
-                    .selectable_label(self.vad_mode == "continuous", "Continuous")
-                    .clicked()
-                {
-                    self.vad_mode = "continuous".to_string();
-                    modified = true;
-                }
-            });
-
-            ui.add_space(5.0);
 
             ui.horizontal(|ui| {
                 ui.label("启动阈值:");
@@ -201,10 +178,6 @@ impl VadAsrPanel {
         // 状态显示
         ui.group(|ui| {
             ui.label("状态:");
-            ui.horizontal(|ui| {
-                ui.label("● VAD 模式:");
-                ui.label(&self.vad_mode);
-            });
             ui.horizontal(|ui| {
                 ui.label("● ASR 采样率:");
                 ui.label(format!("{} Hz", self.sample_rate));

@@ -5,8 +5,6 @@ use crate::config::VInputConfig;
 
 /// 基本设置面板
 pub struct BasicSettingsPanel {
-    /// 录音模式
-    recording_mode: String,
     /// ITN 模式
     itn_mode: String,
     /// 音频设备 ID
@@ -20,9 +18,8 @@ pub struct BasicSettingsPanel {
 }
 
 impl BasicSettingsPanel {
-    pub fn new(config: &VInputConfig) -> Self {
+    pub fn new(_config: &VInputConfig) -> Self {
         Self {
-            recording_mode: config.vad.mode.clone(),
             itn_mode: "Auto".to_string(), // TODO: Add to config
             audio_device: "default".to_string(), // TODO: Add to config
             audio_devices: vec![("default".to_string(), "默认设备".to_string())],
@@ -39,31 +36,6 @@ impl BasicSettingsPanel {
         ui.add_space(10.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // 录音模式
-            ui.group(|ui| {
-                ui.label("录音模式");
-                ui.add_space(5.0);
-
-                let prev_mode = self.recording_mode.clone();
-
-                ui.radio_value(&mut self.recording_mode, "push-to-talk".to_string(), "按住说话 (Push-to-Talk)");
-                ui.label("  按住热键时录音，松开后停止");
-                ui.add_space(5.0);
-
-                ui.radio_value(&mut self.recording_mode, "push-to-toggle".to_string(), "按键切换 (Push-to-Toggle)");
-                ui.label("  按一次开始录音，再按一次停止");
-                ui.add_space(5.0);
-
-                ui.radio_value(&mut self.recording_mode, "continuous".to_string(), "连续识别 (Continuous)");
-                ui.label("  持续监听并自动识别语音");
-
-                if self.recording_mode != prev_mode {
-                    modified = true;
-                }
-            });
-
-            ui.add_space(10.0);
-
             // ITN 模式
             ui.group(|ui| {
                 ui.label("文本规范化 (ITN)");
@@ -165,9 +137,7 @@ impl BasicSettingsPanel {
     }
 
     /// 应用到配置
-    pub fn apply_to_config(&self, config: &mut VInputConfig) {
-        config.vad.mode = self.recording_mode.clone();
+    pub fn apply_to_config(&self, _config: &mut VInputConfig) {
         // TODO: Add ITN mode, audio device, language, hotkey to config
     }
 }
-

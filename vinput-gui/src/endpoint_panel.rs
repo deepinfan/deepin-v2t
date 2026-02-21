@@ -1,6 +1,6 @@
 //! 端点检测配置面板
 
-use crate::config::{EndpointConfig, VInputConfig};
+use crate::config::VInputConfig;
 use eframe::egui;
 
 /// 端点检测配置面板

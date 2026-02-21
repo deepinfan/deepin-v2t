@@ -1,6 +1,6 @@
 //! 热词编辑器 GUI
 
-use crate::config::{HotwordsConfig, VInputConfig};
+use crate::config::VInputConfig;
 use eframe::egui;
 use std::collections::HashMap;
 

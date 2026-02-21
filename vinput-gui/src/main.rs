@@ -7,6 +7,7 @@
 //! - 端点检测配置
 
 use eframe::egui;
+use std::panic;
 
 mod config;
 mod basic_settings_panel;
@@ -91,7 +92,18 @@ impl VInputApp {
         Self::setup_custom_fonts(&cc.egui_ctx);
 
         // 加载配置
-        let config = VInputConfig::load().unwrap_or_default();
+        let config = match VInputConfig::load() {
+            Ok(cfg) => {
+                tracing::info!("✓ Config loaded successfully");
+                cfg
+            }
+            Err(e) => {
+                tracing::error!("✗ Failed to load config: {}, using defaults", e);
+                VInputConfig::default()
+            }
+        };
+
+        tracing::info!("✓ Initializing panels...");
 
         Self {
             active_tab: Tab::Basic,
@@ -117,18 +129,24 @@ impl VInputApp {
             "/usr/share/fonts/opentype/source-han-cjk/SourceHanSansSC-Regular.otf",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/wqy-microhei/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  // 添加备用字体
         ];
 
         let mut font_loaded = false;
         for font_path in &font_paths {
-            if let Ok(font_data) = std::fs::read(font_path) {
-                fonts.font_data.insert(
-                    "chinese_font".to_owned(),
-                    std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-                );
-                font_loaded = true;
-                tracing::info!("Loaded Chinese font from: {}", font_path);
-                break;
+            match std::fs::read(font_path) {
+                Ok(font_data) => {
+                    fonts.font_data.insert(
+                        "chinese_font".to_owned(),
+                        std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+                    );
+                    font_loaded = true;
+                    tracing::info!("✓ Loaded Chinese font from: {}", font_path);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("✗ Failed to load font {}: {}", font_path, e);
+                }
             }
         }
 
@@ -145,8 +163,10 @@ impl VInputApp {
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .insert(0, "chinese_font".to_owned());
+
+            tracing::info!("✓ Chinese font configured successfully");
         } else {
-            tracing::warn!("No Chinese font found, using default fonts");
+            tracing::warn!("⚠ No Chinese font found, using default fonts (may have rendering issues)");
         }
 
         ctx.set_fonts(fonts);
@@ -186,7 +206,10 @@ impl VInputApp {
 
 impl eframe::App for VInputApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        tracing::trace!("update() called, active_tab: {:?}", self.active_tab);
+
         // 顶部菜单栏
+        tracing::trace!("Rendering top panel");
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("文件", |ui| {
@@ -213,6 +236,7 @@ impl eframe::App for VInputApp {
         });
 
         // 底部状态栏
+        tracing::trace!("Rendering bottom panel");
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.config_modified {
@@ -233,54 +257,55 @@ impl eframe::App for VInputApp {
         });
 
         // 左侧选项卡栏
+        tracing::trace!("Rendering left side panel");
         egui::SidePanel::left("tab_panel").min_width(120.0).show(ctx, |ui| {
             ui.heading("设置");
             ui.separator();
 
             if ui
-                .selectable_label(self.active_tab == Tab::Basic, "⚙️ 基本设置")
+                .selectable_label(self.active_tab == Tab::Basic, "基本设置")
                 .clicked()
             {
                 self.active_tab = Tab::Basic;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Recognition, "🎙️ 识别设置")
+                .selectable_label(self.active_tab == Tab::Recognition, "识别设置")
                 .clicked()
             {
                 self.active_tab = Tab::Recognition;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Hotwords, "🔥 热词管理")
+                .selectable_label(self.active_tab == Tab::Hotwords, "热词管理")
                 .clicked()
             {
                 self.active_tab = Tab::Hotwords;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Punctuation, "📝 标点控制")
+                .selectable_label(self.active_tab == Tab::Punctuation, "标点控制")
                 .clicked()
             {
                 self.active_tab = Tab::Punctuation;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Advanced, "🔧 高级设置")
+                .selectable_label(self.active_tab == Tab::Advanced, "高级设置")
                 .clicked()
             {
                 self.active_tab = Tab::Advanced;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::Endpoint, "🎯 端点检测")
+                .selectable_label(self.active_tab == Tab::Endpoint, "端点检测")
                 .clicked()
             {
                 self.active_tab = Tab::Endpoint;
             }
 
             if ui
-                .selectable_label(self.active_tab == Tab::VadAsr, "🎤 VAD/ASR")
+                .selectable_label(self.active_tab == Tab::VadAsr, "VAD/ASR")
                 .clicked()
             {
                 self.active_tab = Tab::VadAsr;
@@ -289,7 +314,7 @@ impl eframe::App for VInputApp {
             ui.separator();
 
             if ui
-                .selectable_label(self.active_tab == Tab::About, "ℹ️ 关于")
+                .selectable_label(self.active_tab == Tab::About, "关于")
                 .clicked()
             {
                 self.active_tab = Tab::About;
@@ -297,53 +322,81 @@ impl eframe::App for VInputApp {
         });
 
         // 中央面板
+        tracing::trace!("Rendering central panel for tab: {:?}", self.active_tab);
         egui::CentralPanel::default().show(ctx, |ui| {
-            match self.active_tab {
-                Tab::Basic => {
-                    let modified = self.basic_settings_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
+            // 使用 catch_unwind 捕获面板渲染中的 panic
+            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                tracing::trace!("Inside central panel, rendering tab: {:?}", self.active_tab);
+                match self.active_tab {
+                    Tab::Basic => {
+                        let modified = self.basic_settings_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::Recognition => {
+                        let modified = self.recognition_settings_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::Hotwords => {
+                        let modified = self.hotwords_editor.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::Punctuation => {
+                        let modified = self.punctuation_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::Advanced => {
+                        let modified = self.advanced_settings_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::VadAsr => {
+                        let modified = self.vad_asr_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::Endpoint => {
+                        let modified = self.endpoint_panel.ui(ui);
+                        if modified {
+                            self.config_modified = true;
+                        }
+                    }
+                    Tab::About => {
+                        self.about_panel.ui(ui);
                     }
                 }
-                Tab::Recognition => {
-                    let modified = self.recognition_settings_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::Hotwords => {
-                    let modified = self.hotwords_editor.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::Punctuation => {
-                    let modified = self.punctuation_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::Advanced => {
-                    let modified = self.advanced_settings_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::VadAsr => {
-                    let modified = self.vad_asr_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::Endpoint => {
-                    let modified = self.endpoint_panel.ui(ui);
-                    if modified {
-                        self.config_modified = true;
-                    }
-                }
-                Tab::About => {
-                    self.about_panel.ui(ui);
-                }
+            }));
+
+            // 如果发生 panic，显示错误信息
+            if let Err(e) = result {
+                ui.colored_label(egui::Color32::RED, "⚠ 面板渲染错误");
+                ui.add_space(10.0);
+
+                let error_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                    format!("Panic: {}", s)
+                } else if let Some(s) = e.downcast_ref::<String>() {
+                    format!("Panic: {}", s)
+                } else {
+                    "Unknown panic occurred".to_string()
+                };
+
+                ui.label(&error_msg);
+                tracing::error!("Panel rendering panic for tab {:?}: {}", self.active_tab, error_msg);
+
+                ui.add_space(10.0);
+                ui.label("请尝试:");
+                ui.label("1. 重启应用");
+                ui.label("2. 删除配置文件: ~/.config/vinput/config.toml");
+                ui.label("3. 查看日志获取更多信息");
             }
         });
     }

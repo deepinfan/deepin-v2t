@@ -50,8 +50,6 @@ pub struct PunctuationConfig {
 /// VAD 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
-    /// VAD 模式 (push-to-talk / continuous)
-    pub mode: String,
     /// 启动阈值
     pub start_threshold: f32,
     /// 结束阈值
@@ -92,15 +90,19 @@ pub struct EndpointConfig {
     pub vad_silence_confirm_frames: usize,
 }
 
+const RECOMMENDED_TRAILING_SILENCE_MS: u64 = 1000;
+const RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES: usize = 8;
+const RECOMMENDED_MIN_SILENCE_DURATION_MS: u64 = 700;
+
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
             min_speech_duration_ms: 300,
             max_speech_duration_ms: 30000,
-            trailing_silence_ms: 1000,      // 更新为新的默认值
+            trailing_silence_ms: RECOMMENDED_TRAILING_SILENCE_MS,
             force_timeout_ms: 60000,
             vad_assisted: true,
-            vad_silence_confirm_frames: 8,  // 更新为新的默认值
+            vad_silence_confirm_frames: RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES,
         }
     }
 }
@@ -121,14 +123,13 @@ impl Default for VInputConfig {
                 question_strict: true,
             },
             vad: VadConfig {
-                mode: "push-to-talk".to_string(),
-                start_threshold: 0.7,  // 更新为新的默认值
-                end_threshold: 0.35,   // 更新为新的默认值
+                start_threshold: 0.7,
+                end_threshold: 0.35,
                 min_speech_duration: 100,
-                min_silence_duration: 700,  // 更新为新的默认值
+                min_silence_duration: RECOMMENDED_MIN_SILENCE_DURATION_MS,
             },
             asr: AsrConfig {
-                model_dir: "/usr/share/droplet-voice-input/models".to_string(),  // 使用系统路径
+                model_dir: "/usr/share/droplet-voice-input/models".to_string(),
                 sample_rate: 16000,
                 hotwords_file: None,
                 hotwords_score: 1.5,
@@ -183,8 +184,15 @@ impl VInputConfig {
         // 读取配置文件
         let content = fs::read_to_string(&path)?;
         let config: VInputConfig = toml::from_str(&content)?;
+        let (normalized, updated) = config.normalize_legacy_config();
+
+        if updated {
+            tracing::info!("检测到旧版配置，已升级");
+            normalized.save()?;
+        }
+
         tracing::info!("配置加载成功: {:?}", path);
-        Ok(config)
+        Ok(normalized)
     }
 
     /// 保存配置
@@ -200,6 +208,10 @@ impl VInputConfig {
         fs::write(path, content)?;
         Ok(())
     }
+
+    fn normalize_legacy_config(self) -> (Self, bool) {
+        (self, false)
+    }
 }
 
 #[cfg(test)]
@@ -214,9 +226,9 @@ mod tests {
         assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
         assert_eq!(config.asr.sample_rate, 16000);
         assert_eq!(config.vad.start_threshold, 0.7);
-        assert_eq!(config.vad.min_silence_duration, 700);
-        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
-        assert_eq!(config.endpoint.vad_silence_confirm_frames, 8);
+        assert_eq!(config.vad.min_silence_duration, RECOMMENDED_MIN_SILENCE_DURATION_MS);
+        assert_eq!(config.endpoint.trailing_silence_ms, RECOMMENDED_TRAILING_SILENCE_MS);
+        assert_eq!(config.endpoint.vad_silence_confirm_frames, RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES);
     }
 
     #[test]
@@ -248,7 +260,6 @@ allow_exclamation = false
 question_strict = true
 
 [vad]
-mode = "push-to-talk"
 start_threshold = 0.7
 end_threshold = 0.35
 min_speech_duration = 100
@@ -334,5 +345,16 @@ vad_silence_confirm_frames = 8
         assert!(config.punctuation.pause_ratio > 0.0);
         assert!(config.punctuation.min_tokens > 0);
     }
-}
 
+    #[test]
+    fn test_normalize_legacy_config_no_change_for_partial_legacy_values() {
+        let base = VInputConfig::default();
+
+        let (normalized, updated) = base.normalize_legacy_config();
+
+        assert!(!updated);
+        assert_eq!(normalized.vad.min_silence_duration, RECOMMENDED_MIN_SILENCE_DURATION_MS);
+        assert_eq!(normalized.endpoint.trailing_silence_ms, RECOMMENDED_TRAILING_SILENCE_MS);
+        assert_eq!(normalized.endpoint.vad_silence_confirm_frames, RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES);
+    }
+}

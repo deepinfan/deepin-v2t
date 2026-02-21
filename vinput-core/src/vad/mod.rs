@@ -33,7 +33,7 @@ pub mod silero;
 
 // 导出核心类型
 pub use config::{
-    EnergyGateConfig, HysteresisConfig, InputMode, PreRollConfig, SileroConfig,
+    EnergyGateConfig, HysteresisConfig, PreRollConfig, SileroConfig,
     TransientFilterConfig, VadConfig,
 };
 pub use energy_gate::EnergyGate;

@@ -231,13 +231,6 @@ impl ChineseWordGuard {
         false
     }
 
-    /// 检查是否为非数字模式（如 "一起"、"二般"）
-    ///
-    /// 已废弃：使用 has_non_numeric_suffix 代替
-    #[deprecated(note = "Use has_non_numeric_suffix instead")]
-    fn is_non_numeric_pattern(text: &str) -> bool {
-        Self::has_non_numeric_suffix(text)
-    }
 }
 
 /// ColloquialGuard - 口语守卫
@@ -339,19 +332,19 @@ mod tests {
 
     #[test]
     fn test_chinese_word_guard_non_numeric_pattern() {
-        // 数字 + 非数字后缀应该被保护
-        assert!(ChineseWordGuard::is_non_numeric_pattern("一起"));
-        assert!(ChineseWordGuard::is_non_numeric_pattern("二般"));
-        assert!(ChineseWordGuard::is_non_numeric_pattern("三下"));
+        // 数字 + 非数字后缀应该被保护（跳过转换）
+        assert!(ChineseWordGuard::should_skip_conversion("一起"));
+        assert!(ChineseWordGuard::should_skip_conversion("二般"));
+        assert!(ChineseWordGuard::should_skip_conversion("三下"));
 
-        // 数字 + 数字单位不应该被保护
-        assert!(!ChineseWordGuard::is_non_numeric_pattern("一十"));
-        assert!(!ChineseWordGuard::is_non_numeric_pattern("二百"));
-        assert!(!ChineseWordGuard::is_non_numeric_pattern("三千"));
+        // 数字 + 数字单位不应该被保护（允许转换）
+        assert!(!ChineseWordGuard::should_skip_conversion("一十"));
+        assert!(!ChineseWordGuard::should_skip_conversion("二百"));
+        assert!(!ChineseWordGuard::should_skip_conversion("三千"));
 
-        // 单个字符或多于两个字符不匹配模式
-        assert!(!ChineseWordGuard::is_non_numeric_pattern("一"));
-        assert!(!ChineseWordGuard::is_non_numeric_pattern("一二三"));
+        // 单个字符或纯数字序列不跳过转换
+        assert!(!ChineseWordGuard::should_skip_conversion("一"));
+        assert!(!ChineseWordGuard::should_skip_conversion("一二三"));
     }
 
     #[test]

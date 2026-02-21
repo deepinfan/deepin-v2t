@@ -159,8 +159,4 @@ impl AboutPanel {
         false // 关于页不会修改配置
     }
 
-    /// 应用到配置（关于页不需要）
-    pub fn apply_to_config(&self, _config: &mut VInputConfig) {
-        // 关于页不修改配置
-    }
 }

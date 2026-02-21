@@ -315,9 +315,28 @@ impl<'a> OnlineStream<'a> {
         }
     }
 
-    /// 获取识别结果（仅文本）
+    /// 获取识别结果（仅文本，不提取 token 列表，效率更高）
+    ///
+    /// 用于流式识别过程中频繁查询当前部分结果
     pub fn get_result(&self, recognizer: &OnlineRecognizer) -> String {
-        self.get_detailed_result(recognizer).text
+        unsafe {
+            let result_ptr = SherpaOnnxGetOnlineStreamResult(recognizer.as_ptr(), self.inner);
+            if result_ptr.is_null() {
+                return String::new();
+            }
+
+            let text_ptr = (*result_ptr).text;
+            let text = if !text_ptr.is_null() {
+                CStr::from_ptr(text_ptr)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                String::new()
+            };
+
+            SherpaOnnxDestroyOnlineRecognizerResult(result_ptr);
+            text
+        }
     }
 
     /// 获取详细识别结果（包含 Token 和时间戳）
@@ -342,11 +361,11 @@ impl<'a> OnlineStream<'a> {
             let mut tokens = Vec::new();
             let count = (*result_ptr).count as usize;
 
-            tracing::info!("🔍 Sherpa-ONNX 原始结果:");
-            tracing::info!("  - text: '{}'", text);
-            tracing::info!("  - count: {}", count);
-            tracing::info!("  - tokens_arr.is_null(): {}", (*result_ptr).tokens_arr.is_null());
-            tracing::info!("  - timestamps.is_null(): {}", (*result_ptr).timestamps.is_null());
+            tracing::debug!("🔍 Sherpa-ONNX 原始结果:");
+            tracing::debug!("  - text: '{}'", text);
+            tracing::debug!("  - count: {}", count);
+            tracing::debug!("  - tokens_arr.is_null(): {}", (*result_ptr).tokens_arr.is_null());
+            tracing::debug!("  - timestamps.is_null(): {}", (*result_ptr).timestamps.is_null());
 
             // Paraformer 模型不提供 timestamps，但提供 tokens_arr
             if count > 0 && !(*result_ptr).tokens_arr.is_null() {
@@ -364,7 +383,7 @@ impl<'a> OnlineStream<'a> {
                     tracing::debug!("📍 Sherpa-ONNX 原始 timestamps (秒): {:?}",
                         timestamps.unwrap().iter().take(count.min(20)).collect::<Vec<_>>());
                 } else {
-                    tracing::info!("⚠️  Paraformer 模型不提供 timestamps，使用估算时间");
+                    tracing::debug!("⚠️  Paraformer 模型不提供 timestamps，使用估算时间");
                 }
 
                 for i in 0..count {
@@ -414,11 +433,11 @@ impl<'a> OnlineStream<'a> {
                     }
                 }
 
-                tracing::info!("✅ 提取了 {} 个原始 tokens", tokens.len());
+                tracing::debug!("✅ 提取了 {} 个原始 tokens", tokens.len());
 
                 // 合并 BPE tokens（处理 @@ 标记）
                 tokens = Self::merge_bpe_tokens(tokens);
-                tracing::info!("✅ BPE 合并后: {} 个 tokens", tokens.len());
+                tracing::debug!("✅ BPE 合并后: {} 个 tokens", tokens.len());
             }
 
             let result = RecognitionResult {

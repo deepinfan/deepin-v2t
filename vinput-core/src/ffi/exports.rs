@@ -29,7 +29,8 @@ struct VInputCoreState {
     pipeline: Arc<Mutex<StreamingPipeline>>,
     /// ITN 引擎（共享，供音频线程使用）
     itn_engine: Arc<Mutex<ITNEngine>>,
-    /// 热词引擎
+    /// 热词引擎（仅用于初始化日志）
+    #[allow(dead_code)]
     hotwords_engine: Option<HotwordsEngine>,
     /// 命令队列（共享，供音频线程使用）
     command_queue: Arc<Mutex<VecDeque<VInputCommand>>>,
@@ -179,7 +180,19 @@ impl VInputCoreState {
         loop {
             // 检查停止信号
             if *stop_signal.lock().unwrap() {
-                tracing::info!("收到停止信号，退出音频处理");
+                tracing::info!("收到停止信号，耗尽 ring buffer 剩余数据后退出");
+                // 耗尽 ring buffer 中已写入但未处理的剩余帧
+                // 避免末尾轻声音频因 PipeWire 停止时序问题被丢弃
+                loop {
+                    let remaining = consumer.read(&mut frame_buffer);
+                    if remaining < FRAME_SIZE {
+                        break;
+                    }
+                    if let Ok(mut pipe) = pipeline.lock() {
+                        let _ = pipe.process(&frame_buffer);
+                    }
+                }
+                tracing::info!("ring buffer 耗尽，退出音频处理");
                 break;
             }
 
