@@ -251,6 +251,26 @@ impl EndpointDetector {
             return EndpointResult::Continue;
         }
 
+        // ASR 检测到端点：只在 TrailingSilence 阶段处理，避免中途停顿被误判为句末
+        // 原因：ASR 模型可能在说话中间的自然停顿时触发端点，
+        //       但只有经过 VAD 确认的尾部静音（TrailingSilence）才是真正的句末
+        if self.state != DetectorState::TrailingSilence {
+            tracing::debug!("端点检测: ASR 端点但非 TrailingSilence 阶段（当前: {:?}），忽略",
+                self.state);
+            return EndpointResult::Continue;
+        }
+
+        // 检查尾部静音已持续足够长（至少 trailing_silence_ms / 2）
+        let silence_duration = self.silence_start_time
+            .map(|t| t.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let min_silence = self.config.trailing_silence_ms / 2;
+        if (silence_duration.as_millis() as u64) < min_silence {
+            tracing::debug!("端点检测: ASR 端点但 TrailingSilence 尚短 ({}ms < {}ms)，继续等待",
+                silence_duration.as_millis(), min_silence);
+            return EndpointResult::Continue;
+        }
+
         // ASR 检测到端点
         let speech_duration = self.speech_start_time
             .map(|t| t.elapsed())
@@ -262,8 +282,8 @@ impl EndpointDetector {
             return EndpointResult::Continue;
         }
 
-        tracing::info!("端点检测: ASR 检测到端点 (语音: {}ms)",
-            speech_duration.as_millis());
+        tracing::info!("端点检测: ASR 检测到端点 (语音: {}ms, 静音: {}ms)",
+            speech_duration.as_millis(), silence_duration.as_millis());
         EndpointResult::Detected
     }
 
