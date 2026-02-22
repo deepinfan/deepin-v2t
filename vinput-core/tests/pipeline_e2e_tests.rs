@@ -7,7 +7,10 @@
 //!   - NNN_描述.expected  期望的最终识别结果（含标点和 ITN）
 //!
 //! 运行方式（带详细日志）：
-//!   RUST_LOG=info cargo test --test pipeline_e2e_tests -- --nocapture
+//!   RUST_LOG=info cargo test --features vad-onnx --test pipeline_e2e_tests -- --nocapture
+//!
+//! 注意：需要 vad-onnx feature 才能启用 CT-Transformer 标点模型。
+//!   不加 --features vad-onnx 时，cargo 会自动跳过此测试（required-features）。
 
 use std::path::{Path, PathBuf};
 use vinput_core::{
