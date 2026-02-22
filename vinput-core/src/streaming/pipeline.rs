@@ -5,9 +5,11 @@
 use crate::asr::{OnlineRecognizer, OnlineRecognizerConfig, OnlineStream};
 use crate::endpointing::{EndpointDetector, EndpointDetectorConfig, EndpointResult};
 use crate::error::VInputResult;
-use crate::punctuation::{PunctuationEngine, StyleProfile};
 use crate::vad::{VadConfig, VadManager, VadState};
 use std::time::Instant;
+
+#[cfg(feature = "vad-onnx")]
+use crate::punctuation::CtTransformerPunct;
 
 /// 流式管道配置
 #[derive(Debug, Clone)]
@@ -16,8 +18,8 @@ pub struct StreamingConfig {
     pub vad_config: VadConfig,
     /// ASR 配置
     pub asr_config: OnlineRecognizerConfig,
-    /// 标点风格配置
-    pub punctuation_profile: StyleProfile,
+    /// 标点模型目录（CT-Transformer ONNX）
+    pub punct_model_dir: String,
     /// 端点检测配置
     pub endpoint_config: EndpointDetectorConfig,
 }
@@ -27,7 +29,7 @@ impl Default for StreamingConfig {
         Self {
             vad_config: VadConfig::push_to_talk_default(),
             asr_config: OnlineRecognizerConfig::default(),
-            punctuation_profile: StyleProfile::default(),
+            punct_model_dir: crate::config::resolve_punct_model_dir(),
             endpoint_config: EndpointDetectorConfig::default(),
         }
     }
@@ -53,7 +55,7 @@ pub struct StreamingResult {
     pub stable_text: String,
     /// 不稳定的文本（保留在 Preedit）
     pub unstable_text: String,
-    /// 是否应该添加逗号（检测到停顿）
+    /// 是否应该添加逗号（停顿检测，保留字段兼容性）
     pub should_add_comma: bool,
     /// 是否为最终结果
     pub is_final: bool,
@@ -73,7 +75,6 @@ pub struct StreamingPipeline {
     vad_manager: VadManager,
     asr_recognizer: OnlineRecognizer,
     asr_stream: Option<OnlineStream<'static>>,
-    punctuation_engine: PunctuationEngine,
     endpoint_detector: EndpointDetector,
     pipeline_state: PipelineState,
 
@@ -89,31 +90,14 @@ pub struct StreamingPipeline {
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
 
-    // ── VAD 停顿检测（帧计数法，与墙上时钟无关，测试/生产均适用）──────────────
-    /// VAD 检测到的停顿逗号插入位置（部分结果字符数，在停顿达到阈值时快照）
-    ///
-    /// 直接使用字符计数而非 ms 时间戳，避免 token.start_time_ms（均匀 200ms/字）
-    /// 与 asr_frames*32ms（真实音频时间）之间的时间系统不对齐问题。
-    vad_pause_char_positions: Vec<usize>,
-    /// 上一帧是否为 VAD 语音帧
-    vad_prev_is_speech: bool,
-    /// 最后一个语音帧送入 ASR 后的 asr_frames 值（保留用于日志）
-    vad_last_speech_asr_frame: u64,
-    /// 连续非语音帧计数（帧计数，1 帧 = 32ms 音频时间）
-    vad_silence_frame_count: u64,
-    /// 当前停顿是否已记录过逗号位置（防止同一停顿重复记录）
-    vad_comma_recorded_for_pause: bool,
-    /// 上一帧的 ASR 部分结果字符数（停顿发生时用于定位逗号位置）
-    last_partial_char_count: usize,
+    /// CT-Transformer 标点模型（需要 vad-onnx feature）
+    #[cfg(feature = "vad-onnx")]
+    punct_model: Option<CtTransformerPunct>,
 }
 
 impl StreamingPipeline {
     /// 创建新的流式管道
     pub fn new(config: StreamingConfig) -> VInputResult<Self> {
-        tracing::info!("📍 StreamingPipeline::new - 接收到的标点配置: pause_ratio={}, min_tokens={}",
-            config.punctuation_profile.streaming_pause_ratio,
-            config.punctuation_profile.streaming_min_tokens
-        );
         tracing::info!("🎯 端点检测配置: trailing_silence={}ms, min_speech={}ms",
             config.endpoint_config.trailing_silence_ms,
             config.endpoint_config.min_speech_duration_ms
@@ -121,14 +105,28 @@ impl StreamingPipeline {
 
         let vad_manager = VadManager::new(config.vad_config.clone())?;
         let asr_recognizer = OnlineRecognizer::new(&config.asr_config)?;
-        let punctuation_engine = PunctuationEngine::new(config.punctuation_profile.clone());
         let endpoint_detector = EndpointDetector::new(config.endpoint_config.clone());
+
+        // 加载 CT-Transformer 标点模型（仅在 vad-onnx feature 启用时）
+        #[cfg(feature = "vad-onnx")]
+        let punct_model = {
+            let model_dir = std::path::Path::new(&config.punct_model_dir);
+            match CtTransformerPunct::new(model_dir) {
+                Ok(model) => {
+                    tracing::info!("✅ CT-Transformer 标点模型加载成功: {}", config.punct_model_dir);
+                    Some(model)
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  CT-Transformer 标点模型加载失败（将不添加标点）: {}", e);
+                    None
+                }
+            }
+        };
 
         Ok(Self {
             config,
             vad_manager,
             asr_recognizer,
-            punctuation_engine,
             endpoint_detector,
             asr_stream: None,
             pipeline_state: PipelineState::Idle,
@@ -136,12 +134,8 @@ impl StreamingPipeline {
             asr_endpoint_grace_remaining: 0,
             total_frames: 0,
             asr_frames: 0,
-            vad_pause_char_positions: Vec::new(),
-            vad_prev_is_speech: false,
-            vad_last_speech_asr_frame: 0,
-            vad_silence_frame_count: 0,
-            vad_comma_recorded_for_pause: false,
-            last_partial_char_count: 0,
+            #[cfg(feature = "vad-onnx")]
+            punct_model,
         })
     }
 
@@ -220,7 +214,6 @@ impl StreamingPipeline {
                                     self.config.vad_config.silero.sample_rate as i32,
                                 );
                                 // 按实际帧数计数（512 samples/帧），而非固定 +1
-                                // 这样 asr_frames * 32ms 与 token 的 start_time_ms 保持对齐
                                 self.asr_frames += (pre_roll_audio.len() as u64 + 511) / 512;
                                 tracing::info!(
                                     "✅ 注入 Pre-roll 音频: {} 样本 ({} 帧)",
@@ -254,90 +247,6 @@ impl StreamingPipeline {
             }
         }
 
-        // 3.5 VAD 停顿检测（帧计数法）
-        //
-        // 不依赖墙上时钟（Instant::now()），1 帧 = 512 samples = 32ms 音频时间。
-        // 在快速回放测试和实时生产环境中行为完全一致。
-        //
-        // 算法：
-        //   - 连续非语音帧 >= COMMA_PAUSE_MIN_FRAMES (320ms) 视为停顿
-        //   - 停顿结束（语音恢复）时，记录停顿前最后一个语音帧对应的音频时刻
-        //   - 在 get_final_result_with_punctuation() 中通过 token.start_time_ms 比较
-        //     找到对应的词边界并插入逗号
-        const COMMA_PAUSE_MIN_FRAMES: u64 = 10; // 10 × 32ms = 320ms
-        if self.pipeline_state == PipelineState::Recognizing {
-            let is_vad_speech = matches!(
-                vad_result.state,
-                VadState::Speech | VadState::SpeechCandidate
-            );
-
-            if is_vad_speech {
-                // 检测停顿结束：从非语音恢复到语音（用于日志，不再用于逗号记录）
-                if !self.vad_prev_is_speech && self.vad_silence_frame_count >= COMMA_PAUSE_MIN_FRAMES {
-                    let pause_ms = self.vad_silence_frame_count * 32;
-                    tracing::info!(
-                        "🔤 VAD 停顿结束: {}ms ({}帧), 语音恢复，逗号已在阈值时记录",
-                        pause_ms, self.vad_silence_frame_count
-                    );
-                } else if !self.vad_prev_is_speech && self.vad_silence_frame_count > 0 {
-                    tracing::debug!(
-                        "  语音恢复: 停顿 {}帧 ({}ms)，不足 {} 帧，不插逗号",
-                        self.vad_silence_frame_count,
-                        self.vad_silence_frame_count * 32,
-                        COMMA_PAUSE_MIN_FRAMES
-                    );
-                }
-                // 记录当前语音帧对应的 asr_frames（日志用）
-                self.vad_last_speech_asr_frame = self.asr_frames;
-                self.vad_silence_frame_count = 0;
-                self.vad_comma_recorded_for_pause = false; // 语音恢复时重置标志
-                self.vad_prev_is_speech = true;
-            } else {
-                self.vad_silence_frame_count += 1;
-                self.vad_prev_is_speech = false;
-                // 静音达到或超过阈值后，在更新窗口内持续更新逗号候选位置：
-                // - ASR 产出比 VAD 慢约一个批次（~19帧×32ms=608ms）
-                // - 需要在停顿期间等待 ASR 追赶，记录正确的词边界位置
-                // - 更新窗口 COMMA_PAUSE_MIN_FRAMES ... COMMA_PAUSE_MIN_FRAMES+UPDATE_WINDOW
-                const UPDATE_WINDOW: u64 = 30; // 30×32ms=960ms，覆盖约 1.5 个 ASR 批次
-                if self.vad_silence_frame_count >= COMMA_PAUSE_MIN_FRAMES {
-                    let frames_over_min = self.vad_silence_frame_count - COMMA_PAUSE_MIN_FRAMES;
-                    if frames_over_min <= UPDATE_WINDOW {
-                        let char_pos = self.last_partial_char_count;
-                        if self.vad_silence_frame_count == COMMA_PAUSE_MIN_FRAMES {
-                            tracing::info!(
-                                "⏸️  VAD 停顿达到逗号阈值: {}帧 ({}ms), 当前部分结果字符数={}, grace={}",
-                                self.vad_silence_frame_count,
-                                self.vad_silence_frame_count * 32,
-                                char_pos,
-                                self.asr_endpoint_grace_remaining
-                            );
-                        }
-                        if char_pos >= 4 {
-                            if !self.vad_comma_recorded_for_pause {
-                                // 首次满足条件：新建条目
-                                tracing::info!(
-                                    "✏️  VAD 逗号位置初次记录: char_pos={} (停顿 {}帧 = {}ms)",
-                                    char_pos, self.vad_silence_frame_count,
-                                    self.vad_silence_frame_count * 32
-                                );
-                                self.vad_pause_char_positions.push(char_pos);
-                                self.vad_comma_recorded_for_pause = true;
-                            } else if char_pos > *self.vad_pause_char_positions.last().unwrap() {
-                                // ASR 在停顿期间解码了更多字符：更新位置（更精确的词边界）
-                                tracing::info!(
-                                    "✏️  VAD 逗号位置更新: {} → {} (停顿 {}帧)",
-                                    self.vad_pause_char_positions.last().unwrap(),
-                                    char_pos, self.vad_silence_frame_count
-                                );
-                                *self.vad_pause_char_positions.last_mut().unwrap() = char_pos;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // 4. 执行 ASR 解码（如果流准备好）并检查 ASR 端点
         if self.pipeline_state == PipelineState::Recognizing {
             if let Some(stream) = &mut self.asr_stream {
@@ -349,10 +258,8 @@ impl StreamingPipeline {
                     // 处于 ASR endpoint 缓冲期：继续喂音频，倒计时
                     self.asr_endpoint_grace_remaining -= 1;
                     tracing::debug!(
-                        "Pipeline: ASR 端点缓冲期剩余 {} 帧, vad_silence={}, vad_prev_speech={}",
+                        "Pipeline: ASR 端点缓冲期剩余 {} 帧",
                         self.asr_endpoint_grace_remaining,
-                        self.vad_silence_frame_count,
-                        self.vad_prev_is_speech
                     );
                     if self.asr_endpoint_grace_remaining == 0 {
                         // 缓冲期结束：刷新并提交
@@ -392,26 +299,11 @@ impl StreamingPipeline {
         // 6. 分离稳定和不稳定文本
         let (stable_text, unstable_text) = self.split_stable_unstable(&partial_result);
 
-        // 7. 更新部分结果字符数（用于 VAD 停顿时定位逗号位置）
-        if self.pipeline_state == PipelineState::Recognizing && !partial_result.is_empty() {
-            let new_count = partial_result.chars().count();
-            if new_count != self.last_partial_char_count {
-                tracing::debug!(
-                    "ASR 部分结果更新: {} → {} 字符 (vad_silence={}帧)",
-                    self.last_partial_char_count, new_count, self.vad_silence_frame_count
-                );
-            }
-            self.last_partial_char_count = new_count;
-        }
-
-        // 8. 检测是否应该添加逗号（停顿检测）
-        let should_add_comma = false; // TODO: 实现停顿检测逻辑
-
         Ok(StreamingResult {
             partial_result,
             stable_text,
             unstable_text,
-            should_add_comma,
+            should_add_comma: false,
             is_final,
             vad_state: vad_result.state,
             pipeline_state: self.pipeline_state,
@@ -450,9 +342,6 @@ impl StreamingPipeline {
         // 重置 VAD
         self.vad_manager.reset();
 
-        // 重置标点引擎
-        self.punctuation_engine.reset_sentence();
-
         // 重置端点检测器
         self.endpoint_detector.reset();
 
@@ -460,17 +349,8 @@ impl StreamingPipeline {
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
         self.asr_endpoint_grace_remaining = 0;
-        // asr_frames 必须归零：ASR token 时间戳从每条新流的 0ms 开始，
-        // 若不归零则 VAD 停顿时刻与 token 时间戳对不齐
+        // asr_frames 必须归零：ASR token 时间戳从每条新流的 0ms 开始
         self.asr_frames = 0;
-
-        // 重置 VAD 停顿检测状态
-        self.vad_pause_char_positions.clear();
-        self.vad_prev_is_speech = false;
-        self.vad_last_speech_asr_frame = 0;
-        self.vad_silence_frame_count = 0;
-        self.vad_comma_recorded_for_pause = false;
-        self.last_partial_char_count = 0;
 
         Ok(())
     }
@@ -525,22 +405,17 @@ impl StreamingPipeline {
     /// 分离稳定和不稳定文本
     ///
     /// 保留最后 N 个字符在 Preedit（不稳定），其余部分可以立即上屏（稳定）
-    ///
-    /// 智能过滤：如果整个识别结果包含中文数字，则全部保留在 Preedit，
-    /// 避免 ITN 转换时无法修改已上屏的数字
     fn split_stable_unstable(&self, text: &str) -> (String, String) {
-        // 🎯 优先检查：如果整个文本包含中文数字，全部保留在 Preedit
+        // 如果整个文本包含中文数字，全部保留在 Preedit（等待 ITN 处理）
         if Self::contains_chinese_number(text) {
             return (String::new(), text.to_string());
         }
 
-        // 如果不包含数字，按正常逻辑分离
-        const KEEP_LAST_CHARS: usize = 2; // 保留最后2个字符在 Preedit
+        const KEEP_LAST_CHARS: usize = 2;
 
         let chars: Vec<char> = text.chars().collect();
 
         if chars.len() <= KEEP_LAST_CHARS {
-            // 全部不稳定
             return (String::new(), text.to_string());
         }
 
@@ -552,8 +427,6 @@ impl StreamingPipeline {
     }
 
     /// 检查文本是否包含中文数字字符
-    ///
-    /// 用于判断是否需要延迟上屏，等待 ITN 处理
     fn contains_chinese_number(text: &str) -> bool {
         text.chars().any(|c| matches!(c,
             '零' | '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' |
@@ -561,33 +434,13 @@ impl StreamingPipeline {
         ))
     }
 
-    /// 获取实时识别结果（带实时标点处理）
+    /// 获取实时识别结果（Preedit 展示用）
     ///
-    /// 用于在识别过程中显示带标点的 Preedit
-    /// 不会重置管道状态，不会添加句尾标点
+    /// CT-Transformer 不适合对流式部分结果做推理（缺乏完整上下文），
+    /// 因此直接返回 ASR 纯文本，标点在最终结果时统一处理。
     pub fn get_partial_result_with_punctuation(&mut self) -> String {
         if let Some(stream) = &self.asr_stream {
-            // 获取详细结果（包含 Token 和时间戳）
-            let detailed_result = stream.get_detailed_result(&self.asr_recognizer);
-
-            if detailed_result.is_empty() {
-                return String::new();
-            }
-
-            // 处理每个 Token，添加逗号（但不添加句尾标点）
-            let mut text_with_commas = String::new();
-
-            for token in &detailed_result.tokens {
-                // 转换为 TokenInfo
-                let token_info = token.to_token_info();
-
-                // 处理 Token（可能在前面添加逗号）
-                if let Some(processed_token) = self.punctuation_engine.process_token(token_info) {
-                    text_with_commas.push_str(&processed_token);
-                }
-            }
-
-            text_with_commas
+            stream.get_result(&self.asr_recognizer)
         } else {
             String::new()
         }
@@ -595,16 +448,16 @@ impl StreamingPipeline {
 
     /// 获取最终识别结果（带标点）
     ///
-    /// 调用此方法后会自动重置管道状态
+    /// 使用 CT-Transformer ONNX 模型为 ASR 输出添加标点。
+    /// 调用此方法后会自动重置管道状态。
     pub fn get_final_result_with_punctuation(&mut self) -> String {
         // 通知解码器输入已结束，触发最终 beam search 完成
-        // 对于轻声末字：ASR 缓冲区里有这些帧，但未经 input_finished() 就无法提交
         if let Some(stream) = &mut self.asr_stream {
             tracing::info!("🔚 调用 input_finished()，刷新 ASR 解码器缓冲区");
             stream.input_finished();
         }
 
-        // 最终一次解码，处理 input_finished() 后的剩余帧
+        // 最终一次解码
         if let Some(stream) = &mut self.asr_stream {
             if stream.is_ready(&self.asr_recognizer) {
                 stream.decode(&self.asr_recognizer);
@@ -612,133 +465,57 @@ impl StreamingPipeline {
             }
         }
 
-        let result = if let Some(stream) = &self.asr_stream {
-            // 获取详细结果（包含 Token 和时间戳）
+        // 收集纯文本（在独立作用域内完成，释放 asr_stream 借用）
+        let plain_text = if let Some(stream) = &self.asr_stream {
             let detailed_result = stream.get_detailed_result(&self.asr_recognizer);
 
-            tracing::info!("📊 ASR 识别结果详情:");
-            tracing::info!("  - text: '{}'", detailed_result.text);
-            tracing::info!("  - text.len(): {}", detailed_result.text.len());
-            tracing::info!("  - token_count: {}", detailed_result.tokens.len());
-            tracing::info!("  - is_empty(): {}", detailed_result.is_empty());
+            tracing::info!("📊 ASR 识别结果: text='{}', tokens={}",
+                detailed_result.text, detailed_result.tokens.len());
 
             if detailed_result.is_empty() {
-                tracing::warn!("⚠️  识别结果为空（text 为空字符串）");
+                tracing::warn!("⚠️  识别结果为空");
                 String::new()
             } else {
-                // 打印所有 Token 信息（INFO 级别，帮助分析断句）
                 for (i, token) in detailed_result.tokens.iter().enumerate() {
-                    tracing::info!("  Token[{}]: '{}' ({}ms - {}ms, duration={}ms)",
-                        i, token.text, token.start_time_ms, token.end_time_ms, token.duration_ms());
+                    tracing::info!("  Token[{}]: '{}' ({}ms - {}ms)",
+                        i, token.text, token.start_time_ms, token.end_time_ms);
                 }
 
-                // 第一步：构建纯文本，同时收集 VAD 停顿逗号位置
-                //
-                // 注意：逻辑连接词（所以/但是/因为…）检测【不在此循环内】做，
-                // 因为 Paraformer 输出字符级 token，"所以"会拆成"所"+"以"两个
-                // token，逐 token 的 is_logic_word() 永远匹配不到二字词。
-                // 改为先拼全文，再用 find_logic_comma_positions() 子串扫描。
-                let mut plain_text = String::new();
-
+                let mut text = String::new();
                 for token in &detailed_result.tokens {
-                    let token_info = token.to_token_info();
-                    let word = token_info.text.trim().to_string();
-                    if word.is_empty() || word == "NE" {
-                        continue;
+                    let word = token.text.trim();
+                    if !word.is_empty() && word != "NE" {
+                        text.push_str(word);
                     }
-                    plain_text.push_str(&word);
                 }
-
-                // 第二步：在完整纯文本上扫描逻辑连接词（绕过字符级 token 拆分问题）
-                let mut logic_comma_positions =
-                    crate::punctuation::rules::RuleLayer::find_logic_comma_positions(
-                        &plain_text,
-                        8,
-                    );
-                if !logic_comma_positions.is_empty() {
-                    tracing::info!("  📌 逻辑词逗号位置: {:?}", logic_comma_positions);
-                }
-
-                // 合并逻辑词逗号 + VAD 停顿逗号
-                // VAD 停顿位置直接使用字符数（停顿发生时的部分结果字符计数），
-                // 不再依赖 token.start_time_ms 与 asr_frames*32ms 对齐
-                let total_chars = plain_text.chars().count();
-                let vad_comma_positions: Vec<usize> = self.vad_pause_char_positions.iter()
-                    .filter(|&&pos| pos >= 4 && pos < total_chars)
-                    .copied()
-                    .collect();
-                if !vad_comma_positions.is_empty() {
-                    tracing::info!("  🔤 VAD 停顿逗号位置: {:?} (总字数={})", vad_comma_positions, total_chars);
-                }
-                logic_comma_positions.extend(vad_comma_positions);
-
-                tracing::info!("📝 纯文本: '{}', 逗号位置(逻辑词+VAD停顿): {:?}",
-                    plain_text, logic_comma_positions);
-
-                // 第三步：排序去重，插入逗号
-                let mut comma_positions = logic_comma_positions;
-                comma_positions.sort_unstable();
-                comma_positions.dedup();
-
-                // 第四步：将逗号插入到纯文本的对应字符位置
-                const MIN_CHARS_BETWEEN_COMMAS: usize = 3;
-                let mut final_text = String::with_capacity(plain_text.len() + comma_positions.len() * 3);
-                let mut last_comma_at: Option<usize> = None;
-
-                for (i, ch) in plain_text.char_indices().map(|(_, c)| c).enumerate() {
-                    // 检查此位置是否应插入逗号
-                    if i > 0 && comma_positions.contains(&i) {
-                        let ok = match last_comma_at {
-                            None => i >= MIN_CHARS_BETWEEN_COMMAS,
-                            Some(last) => i >= last + MIN_CHARS_BETWEEN_COMMAS,
-                        };
-                        if ok {
-                            tracing::info!("  ✅ 在第 {} 个字符前插入逗号", i);
-                            final_text.push('，');
-                            last_comma_at = Some(i);
-                        }
-                    }
-                    final_text.push(ch);
-                }
-
-                tracing::info!("📝 插入逗号后: '{}'", final_text);
-
-                // 检测 VAD 能量变化（用于问号检测）
-                let energy_rising = self.endpoint_detector.analyze_energy_trend();
-
-                // 获取语音持续时间用于标点决策
-                // ⚠️  用 asr_frames × 32ms 而非墙上时钟
-                //     理由：快速处理（测试回放）时墙上时钟远短于实际音频时长
-                let speech_duration_ms = self.asr_frames * 32;
-
-                tracing::debug!("🔚 准备添加句尾标点: speech_duration_ms={}, energy_rising={}",
-                    speech_duration_ms, energy_rising);
-
-                // 🎯 如果最后一个字符是逗号，替换为句尾标点
-                if final_text.ends_with('，') {
-                    final_text.pop(); // 移除最后的逗号
-                    tracing::debug!("  检测到末尾逗号，将替换为句尾标点");
-                }
-
-                // 添加句尾标点
-                // 用 determine_ending(final_text) 而非 finalize_sentence()
-                // 原因：finalize_sentence 依赖 current_sentence（由 process_token 填充），
-                //       但当前流程直接构建 final_text，current_sentence 始终为空
-                let ending = self.punctuation_engine.determine_ending(
-                    &final_text,
-                    speech_duration_ms,
-                    energy_rising,
-                );
-
-                tracing::info!("  句尾标点: '{}'（基于文本: '{}'）", ending, final_text);
-                final_text.push_str(&ending);
-
-                tracing::info!("✅ 标点处理完成: '{}'", final_text);
-                final_text
+                tracing::info!("📝 纯文本: '{}'", text);
+                text
             }
         } else {
             tracing::warn!("⚠️  ASR 流为空");
             String::new()
+        };
+
+        // asr_stream 借用已释放，现在可以同时访问 punct_model
+        let result = if plain_text.is_empty() {
+            String::new()
+        } else {
+            #[cfg(feature = "vad-onnx")]
+            {
+                if let Some(model) = &mut self.punct_model {
+                    let punctuated = model.add_punctuation(&plain_text);
+                    tracing::info!("✅ CT-Transformer 标点结果: '{}'", punctuated);
+                    punctuated
+                } else {
+                    tracing::info!("ℹ️  无标点模型，返回纯文本");
+                    plain_text
+                }
+            }
+            #[cfg(not(feature = "vad-onnx"))]
+            {
+                tracing::info!("ℹ️  vad-onnx feature 未启用，返回纯文本");
+                plain_text
+            }
         };
 
         // 重置管道以准备下一次识别
@@ -757,7 +534,6 @@ impl StreamingPipeline {
             String::new()
         };
 
-        // 重置管道以准备下一次识别
         let _ = self.reset();
 
         result
@@ -766,7 +542,6 @@ impl StreamingPipeline {
 
 impl Drop for StreamingPipeline {
     fn drop(&mut self) {
-        // 确保 ASR 流在管道销毁前被清理
         if let Some(mut stream) = self.asr_stream.take() {
             stream.reset(&self.asr_recognizer);
         }

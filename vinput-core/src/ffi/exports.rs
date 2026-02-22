@@ -63,15 +63,12 @@ impl VInputCoreState {
         };
 
         // 创建流式管道
-        tracing::info!("🔧 创建 StreamingPipeline，标点配置: pause_ratio={}, min_tokens={}",
-            config.punctuation.streaming_pause_ratio,
-            config.punctuation.streaming_min_tokens
-        );
+        tracing::info!("🔧 创建 StreamingPipeline，标点模型目录: {}", config.punct_model_dir);
 
         let streaming_config = StreamingConfig {
             vad_config: config.vad.clone(),
             asr_config: config.asr.clone(),
-            punctuation_profile: config.punctuation.clone(),
+            punct_model_dir: config.punct_model_dir.clone(),
             endpoint_config: config.endpoint.clone(),
         };
         let pipeline = StreamingPipeline::new(streaming_config)?;

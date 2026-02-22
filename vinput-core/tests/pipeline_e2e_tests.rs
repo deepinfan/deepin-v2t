@@ -14,8 +14,7 @@ use vinput_core::{
     asr::OnlineRecognizerConfig,
     endpointing::EndpointDetectorConfig,
     itn::{ITNEngine, ITNMode},
-    punctuation::StyleProfile,
-    streaming::{PipelineState, StreamingConfig, StreamingPipeline},
+    streaming::{StreamingConfig, StreamingPipeline},
     vad::{VadConfig, VadState},
 };
 
@@ -92,15 +91,6 @@ fn create_pipeline() -> StreamingPipeline {
         ..Default::default()
     };
 
-    // 使用配置文件中的标点风格（Custom）
-    let punctuation_profile = StyleProfile {
-        streaming_pause_ratio: 2.15,
-        streaming_min_tokens: 5,
-        allow_exclamation: false,
-        question_strict_mode: true,
-        ..Default::default()
-    };
-
     let endpoint_config = EndpointDetectorConfig {
         min_speech_duration_ms: 300,
         trailing_silence_ms: 600,
@@ -112,7 +102,7 @@ fn create_pipeline() -> StreamingPipeline {
     let config = StreamingConfig {
         vad_config: VadConfig::push_to_talk_default(),
         asr_config,
-        punctuation_profile,
+        punct_model_dir: "../models/punct-ct-transformer".to_string(),
         endpoint_config,
     };
 
@@ -141,25 +131,16 @@ fn run_pipeline(wav_path: &Path) -> String {
     // PushToTalk：强制进入语音状态
     pipeline.force_vad_state(VadState::Speech);
 
-    let mut completed = false;
+    // 喂入全部音频（不在 Completed 时提前退出）
+    // 原因：ASR 端点检测时序非确定性（ONNX 线程调度），提前退出会导致结果随机截断。
+    // get_final_result_with_punctuation() 内部会调用 input_finished() 确保最终解码完整。
     for chunk in samples.chunks(512) {
-        // 最后一块不足 512 则补零（ASR 需要固定大小帧）
         let mut frame = chunk.to_vec();
         frame.resize(512, 0.0);
-
-        let result = pipeline.process(&frame).expect("处理音频帧失败");
-
-        if result.pipeline_state == PipelineState::Completed {
-            completed = true;
-            break;
-        }
+        pipeline.process(&frame).expect("处理音频帧失败");
     }
 
-    if completed {
-        tracing::info!("📍 ASR 端点提前触发，停止喂音频");
-    } else {
-        tracing::info!("📍 音频喂入完毕，获取最终结果");
-    }
+    tracing::info!("📍 音频喂入完毕，获取最终结果");
 
     let punctuated = pipeline.get_final_result_with_punctuation();
 

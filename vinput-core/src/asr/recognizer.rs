@@ -28,14 +28,7 @@ impl RecognizedToken {
         self.end_time_ms.saturating_sub(self.start_time_ms)
     }
 
-    /// 转换为 PunctuationEngine 的 TokenInfo
-    pub fn to_token_info(&self) -> crate::punctuation::TokenInfo {
-        crate::punctuation::TokenInfo::new(
-            self.text.clone(),
-            self.start_time_ms,
-            self.end_time_ms,
-        )
-    }
+
 }
 
 /// 识别结果（包含 Token 信息）

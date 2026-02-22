@@ -5,7 +5,6 @@
 use crate::asr::OnlineRecognizerConfig;
 use crate::endpointing::EndpointDetectorConfig;
 use crate::hotwords::HotwordsConfig;
-use crate::punctuation::PunctuationConfig;
 use crate::vad::VadConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -17,13 +16,32 @@ pub struct VInputConfig {
     pub vad: VadConfig,
     /// ASR 配置
     pub asr: OnlineRecognizerConfig,
-    /// 标点配置
-    pub punctuation: PunctuationConfig,
+    /// 标点模型目录（CT-Transformer ONNX）
+    /// 默认：./models/punct-ct-transformer（开发环境）
+    /// 或 /usr/share/droplet-voice-input/models/punct-ct-transformer（系统安装）
+    #[serde(default = "default_punct_model_dir")]
+    pub punct_model_dir: String,
     /// 热词配置
     pub hotwords: HotwordsConfig,
     /// 端点检测配置（自动断句上屏）
     #[serde(default)]
     pub endpoint: EndpointDetectorConfig,
+}
+
+fn default_punct_model_dir() -> String {
+    resolve_punct_model_dir()
+}
+
+/// 解析标点模型目录（优先级：环境变量 > 系统路径 > 开发路径）
+pub fn resolve_punct_model_dir() -> String {
+    if let Ok(dir) = std::env::var("VINPUT_PUNCT_MODEL_DIR") {
+        return dir;
+    }
+    let system_path = "/usr/share/droplet-voice-input/models/punct-ct-transformer";
+    if std::path::Path::new(system_path).exists() {
+        return system_path.to_string();
+    }
+    "./models/punct-ct-transformer".to_string()
 }
 
 impl Default for VInputConfig {
@@ -34,12 +52,10 @@ impl Default for VInputConfig {
         // 3. 开发路径 ./models/streaming
         let default_model_dir = std::env::var("VINPUT_MODEL_DIR")
             .unwrap_or_else(|_| {
-                // 检查系统安装路径
                 let system_path = "/usr/share/droplet-voice-input/models";
                 if std::path::Path::new(system_path).exists() {
                     system_path.to_string()
                 } else {
-                    // 开发环境路径
                     "./models/streaming".to_string()
                 }
             });
@@ -50,7 +66,7 @@ impl Default for VInputConfig {
         Self {
             vad: VadConfig::push_to_talk_default(),
             asr: asr_config,
-            punctuation: PunctuationConfig::default(),
+            punct_model_dir: resolve_punct_model_dir(),
             hotwords: HotwordsConfig::default(),
             endpoint: EndpointDetectorConfig::default(),
         }
@@ -71,11 +87,7 @@ impl VInputConfig {
         let config: Self = toml::from_str(&content)?;
 
         tracing::info!("📋 加载配置成功: {:?}", config_path);
-        tracing::info!("📊 标点配置: pause_ratio={}, min_tokens={}, allow_exclamation={}",
-            config.punctuation.streaming_pause_ratio,
-            config.punctuation.streaming_min_tokens,
-            config.punctuation.allow_exclamation
-        );
+        tracing::info!("📌 标点模型目录: {}", config.punct_model_dir);
         tracing::info!("🎯 端点检测: trailing_silence={}ms, min_speech={}ms, vad_frames={}",
             config.endpoint.trailing_silence_ms,
             config.endpoint.min_speech_duration_ms,
@@ -88,7 +100,6 @@ impl VInputConfig {
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let config_path = Self::config_path()?;
 
-        // 确保目录存在
         if let Some(parent) = config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
