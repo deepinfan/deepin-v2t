@@ -168,6 +168,8 @@ fn run_pipewire_loop(
     let frame_size = 1024; // 每次读取 1024 个样本
     let buffer_size = frame_size * std::mem::size_of::<f32>();
     let mut buffer = vec![0u8; buffer_size];
+    // 跨读取的字节余量缓冲：stdout.read() 可能返回非 4 字节对齐的数据
+    let mut leftover: Vec<u8> = Vec::with_capacity(3);
     let mut total_samples = 0usize;
 
     while !quit_signal.load(Ordering::Acquire) {
@@ -179,11 +181,16 @@ fn run_pipewire_loop(
                 break;
             }
             Ok(bytes_read) => {
-                // 转换为 f32 样本
-                let sample_count = bytes_read / std::mem::size_of::<f32>();
+                // 将本次读取与上次余量拼接后再转换为 f32 样本
+                leftover.extend_from_slice(&buffer[..bytes_read]);
+                let sample_count = leftover.len() / std::mem::size_of::<f32>();
+                if sample_count == 0 {
+                    continue; // 还不足 4 字节，继续读
+                }
+                let aligned_bytes = sample_count * std::mem::size_of::<f32>();
                 let samples: &[f32] = unsafe {
                     std::slice::from_raw_parts(
-                        buffer.as_ptr() as *const f32,
+                        leftover.as_ptr() as *const f32,
                         sample_count,
                     )
                 };
@@ -201,6 +208,10 @@ fn run_pipewire_loop(
                         tracing::warn!("Ring Buffer 写入失败: {:?}", e);
                     }
                 }
+
+                // 保留未对齐的尾部字节（0~3 字节）
+                let remainder = leftover[aligned_bytes..].to_vec();
+                leftover = remainder;
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // 非阻塞模式下无数据，等待一小会儿

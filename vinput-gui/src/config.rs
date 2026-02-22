@@ -8,6 +8,9 @@ use std::path::PathBuf;
 /// V-Input 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VInputConfig {
+    /// 基本配置
+    #[serde(default)]
+    pub basic: BasicConfig,
     /// 热词配置
     pub hotwords: HotwordsConfig,
     /// 标点配置
@@ -19,6 +22,21 @@ pub struct VInputConfig {
     /// 端点检测配置
     #[serde(default)]
     pub endpoint: EndpointConfig,
+}
+
+/// 基本配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BasicConfig {
+    /// 触发热键（如 "Ctrl+Alt+V"）
+    pub hotkey: String,
+}
+
+impl Default for BasicConfig {
+    fn default() -> Self {
+        Self {
+            hotkey: "RCtrl".to_string(),
+        }
+    }
 }
 
 /// 热词配置
@@ -110,6 +128,7 @@ impl Default for EndpointConfig {
 impl Default for VInputConfig {
     fn default() -> Self {
         Self {
+            basic: BasicConfig::default(),
             hotwords: HotwordsConfig {
                 words: HashMap::new(),
                 global_weight: 2.5,

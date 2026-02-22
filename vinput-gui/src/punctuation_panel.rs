@@ -1,18 +1,13 @@
-//! 标点控制面板 GUI
+//! 标点控制面板
 
 use crate::config::VInputConfig;
 use eframe::egui;
 
 pub struct PunctuationPanel {
-    /// 风格
     style: String,
-    /// 停顿检测阈值
     pause_ratio: f32,
-    /// 最小 token 数
     min_tokens: usize,
-    /// 允许感叹号
     allow_exclamation: bool,
-    /// 问号严格模式
     question_strict: bool,
 }
 
@@ -35,136 +30,114 @@ impl PunctuationPanel {
         config.punctuation.question_strict = self.question_strict;
     }
 
-    /// 渲染 UI，返回是否有修改
     pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut modified = false;
 
-        ui.heading("📝 标点控制");
+        ui.add_space(4.0);
+        ui.heading(egui::RichText::new("标点控制").size(18.0).strong());
+        ui.add_space(2.0);
         ui.separator();
+        ui.add_space(8.0);
 
-        // 风格预设
-        ui.group(|ui| {
-            ui.label("标点风格预设:");
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(self.style == "Professional", "Professional")
-                    .clicked()
-                {
-                    self.style = "Professional".to_string();
-                    self.pause_ratio = 3.5;
-                    self.min_tokens = 5;
-                    self.allow_exclamation = false;
-                    self.question_strict = true;
-                    modified = true;
-                }
-
-                if ui
-                    .selectable_label(self.style == "Balanced", "Balanced")
-                    .clicked()
-                {
-                    self.style = "Balanced".to_string();
-                    self.pause_ratio = 2.5;
-                    self.min_tokens = 3;
-                    self.allow_exclamation = true;
-                    self.question_strict = false;
-                    modified = true;
-                }
-
-                if ui
-                    .selectable_label(self.style == "Expressive", "Expressive")
-                    .clicked()
-                {
-                    self.style = "Expressive".to_string();
-                    self.pause_ratio = 1.8;
-                    self.min_tokens = 2;
-                    self.allow_exclamation = true;
-                    self.question_strict = false;
-                    modified = true;
-                }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // 风格预设
+            ui.label(egui::RichText::new("风格预设").size(13.0).strong());
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    let presets = [
+                        ("Professional", "正式", 3.5_f32, 5_usize, false, true),
+                        ("Balanced",     "均衡", 2.5,     3,       true,  false),
+                        ("Expressive",   "表达", 1.8,     2,       true,  false),
+                    ];
+                    for (id, label, ratio, tokens, excl, strict) in presets {
+                        let active = self.style == id;
+                        if ui.add_sized([90.0, 30.0], egui::SelectableLabel::new(active,
+                            egui::RichText::new(label).size(13.0))).clicked() && !active {
+                            self.style = id.to_string();
+                            self.pause_ratio = ratio;
+                            self.min_tokens = tokens;
+                            self.allow_exclamation = excl;
+                            self.question_strict = strict;
+                            modified = true;
+                        }
+                        ui.add_space(4.0);
+                    }
+                    if self.style == "Custom" {
+                        ui.label(egui::RichText::new("自定义").size(12.0)
+                            .color(egui::Color32::from_rgb(120, 120, 120)));
+                    }
+                });
+                ui.add_space(4.0);
+                let desc = match self.style.as_str() {
+                    "Professional" => "适合正式文档：逗号稀少，严格问号，不用感叹号",
+                    "Balanced"     => "适合日常对话：标点适中，允许感叹号",
+                    "Expressive"   => "适合口语输出：逗号较多，宽松的问号与感叹号",
+                    _              => "已手动调整参数",
+                };
+                ui.label(egui::RichText::new(desc).size(12.0).color(egui::Color32::GRAY));
             });
-        });
 
-        ui.add_space(15.0);
+            ui.add_space(12.0);
 
-        // 停顿检测
-        ui.group(|ui| {
-            ui.label("停顿检测:");
-            ui.horizontal(|ui| {
-                ui.label("停顿阈值:");
-                if ui
-                    .add(egui::Slider::new(&mut self.pause_ratio, 1.0..=5.0).text("x"))
-                    .changed()
-                {
-                    modified = true;
-                    self.style = "Custom".to_string();
-                }
+            // 详细参数
+            ui.label(egui::RichText::new("详细参数").size(13.0).strong());
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                egui::Grid::new("punct_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 10.0])
+                    .min_col_width(110.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("停顿阈值").size(13.0));
+                        if ui.add(egui::Slider::new(&mut self.pause_ratio, 1.0..=5.0)
+                            .suffix("x").fixed_decimals(1)).changed() {
+                            modified = true;
+                            self.style = "Custom".to_string();
+                        }
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new("最小词数").size(13.0));
+                        if ui.add(egui::Slider::new(&mut self.min_tokens, 1..=10)
+                            .suffix(" 词")).changed() {
+                            modified = true;
+                            self.style = "Custom".to_string();
+                        }
+                        ui.end_row();
+                    });
+
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("停顿阈值越大，需要更长停顿才插入逗号；最小词数越大，短句不插逗号").size(11.0)
+                    .color(egui::Color32::GRAY));
             });
-            ui.label("较大的值 = 需要更长的停顿才插入逗号");
 
-            ui.add_space(5.0);
+            ui.add_space(12.0);
 
-            ui.horizontal(|ui| {
-                ui.label("最小 token 数:");
-                if ui
-                    .add(egui::Slider::new(&mut self.min_tokens, 1..=10))
-                    .changed()
-                {
-                    modified = true;
-                    self.style = "Custom".to_string();
-                }
+            // 标点开关
+            ui.label(egui::RichText::new("标点开关").size(13.0).strong());
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                egui::Grid::new("punct_switch_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        if ui.checkbox(&mut self.allow_exclamation,
+                            egui::RichText::new("允许感叹号").size(13.0)).changed() {
+                            modified = true;
+                            self.style = "Custom".to_string();
+                        }
+                        ui.label(egui::RichText::new("根据语调自动添加 ！").size(12.0).color(egui::Color32::GRAY));
+                        ui.end_row();
+
+                        if ui.checkbox(&mut self.question_strict,
+                            egui::RichText::new("问号严格模式").size(13.0)).changed() {
+                            modified = true;
+                            self.style = "Custom".to_string();
+                        }
+                        ui.label(egui::RichText::new("需要声学特征验证才添加 ？").size(12.0).color(egui::Color32::GRAY));
+                        ui.end_row();
+                    });
             });
-            ui.label("至少需要多少个词才开始检测停顿");
-        });
-
-        ui.add_space(15.0);
-
-        // 标点选项
-        ui.group(|ui| {
-            ui.label("标点选项:");
-
-            if ui
-                .checkbox(&mut self.allow_exclamation, "允许感叹号 (!)")
-                .changed()
-            {
-                modified = true;
-                self.style = "Custom".to_string();
-            }
-
-            if ui
-                .checkbox(&mut self.question_strict, "问号严格模式")
-                .changed()
-            {
-                modified = true;
-                self.style = "Custom".to_string();
-            }
-            ui.label("严格模式：需要声学特征验证");
-        });
-
-        ui.add_space(15.0);
-
-        // 预览说明
-        ui.group(|ui| {
-            ui.label("当前配置说明:");
-            match self.style.as_str() {
-                "Professional" => {
-                    ui.label("✓ 适合正式文档和商务场景");
-                    ui.label("✓ 较少的逗号，严格的问号检测");
-                    ui.label("✓ 不使用感叹号");
-                }
-                "Balanced" => {
-                    ui.label("✓ 适合日常对话和一般场景");
-                    ui.label("✓ 平衡的标点密度");
-                    ui.label("✓ 允许感叹号");
-                }
-                "Expressive" => {
-                    ui.label("✓ 适合表达丰富的内容");
-                    ui.label("✓ 较多的逗号，宽松的问号检测");
-                    ui.label("✓ 允许感叹号");
-                }
-                _ => {
-                    ui.label("✓ 自定义配置");
-                }
-            }
         });
 
         modified

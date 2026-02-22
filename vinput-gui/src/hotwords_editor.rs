@@ -1,24 +1,17 @@
-//! 热词编辑器 GUI
+//! 热词编辑器
 
 use crate::config::VInputConfig;
 use eframe::egui;
 use std::collections::HashMap;
 
 pub struct HotwordsEditor {
-    /// 热词列表
     hotwords: HashMap<String, f32>,
-    /// 全局权重
     global_weight: f32,
-    /// 新热词输入
     new_word: String,
-    /// 新热词权重
     new_weight: f32,
-    /// 要删除的热词
     to_delete: Option<String>,
-    /// 导入文件路径
     import_file_path: String,
-    /// 导入状态消息
-    import_status: String,
+    status_msg: String,
 }
 
 impl HotwordsEditor {
@@ -30,7 +23,7 @@ impl HotwordsEditor {
             new_weight: 2.5,
             to_delete: None,
             import_file_path: String::new(),
-            import_status: String::new(),
+            status_msg: String::new(),
         }
     }
 
@@ -39,225 +32,195 @@ impl HotwordsEditor {
         config.hotwords.global_weight = self.global_weight;
     }
 
-    /// 从文件导入热词
     fn import_from_file(&mut self, path: &str) -> Result<usize, String> {
-        use std::fs;
-
-        let content = fs::read_to_string(path).map_err(|e| format!("无法读取文件: {}", e))?;
-
+        let content = std::fs::read_to_string(path).map_err(|e| format!("无法读取文件: {}", e))?;
         let mut count = 0;
         for line in content.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue; // 跳过空行和注释
-            }
-
-            // 尝试解析 "词 权重" 格式
+            if line.is_empty() || line.starts_with('#') { continue; }
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.is_empty() {
-                continue;
-            }
-
+            if parts.is_empty() { continue; }
             let word = parts[0].to_string();
-            let weight = if parts.len() >= 2 {
-                parts[1].parse::<f32>().unwrap_or(2.5).clamp(1.0, 5.0)
-            } else {
-                2.5 // 默认权重
-            };
-
+            let weight = parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(2.5).clamp(1.0, 5.0);
             self.hotwords.insert(word, weight);
             count += 1;
         }
-
         Ok(count)
     }
 
-    /// 导出热词到文件
     fn export_to_file(&self) -> Result<String, String> {
-        use std::fs;
         use std::io::Write;
-
-        // 默认导出路径
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let export_path = format!("{}/vinput-hotwords-export.txt", home);
-
-        let mut file =
-            fs::File::create(&export_path).map_err(|e| format!("无法创建文件: {}", e))?;
-
-        // 写入文件头
-        writeln!(file, "# V-Input 热词导出文件")
-            .map_err(|e| format!("写入失败: {}", e))?;
-        writeln!(file, "# 格式: 词 权重")
-            .map_err(|e| format!("写入失败: {}", e))?;
-        writeln!(file, "# 权重范围: 1.0 - 5.0")
-            .map_err(|e| format!("写入失败: {}", e))?;
-        writeln!(file, "").map_err(|e| format!("写入失败: {}", e))?;
-
-        // 按字母排序导出
+        let path = format!("{}/vinput-hotwords-export.txt", home);
+        let mut file = std::fs::File::create(&path).map_err(|e| format!("无法创建文件: {}", e))?;
+        writeln!(file, "# V-Input 热词导出  格式: 词 权重").map_err(|e| format!("{}", e))?;
         let mut words: Vec<_> = self.hotwords.iter().collect();
         words.sort_by(|a, b| a.0.cmp(b.0));
-
         for (word, weight) in words {
-            writeln!(file, "{} {:.1}", word, weight).map_err(|e| format!("写入失败: {}", e))?;
+            writeln!(file, "{} {:.1}", word, weight).map_err(|e| format!("{}", e))?;
         }
-
-        Ok(export_path)
+        Ok(path)
     }
 
-    /// 渲染 UI，返回是否有修改
     pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut modified = false;
 
-        ui.heading("🔥 热词管理");
+        ui.add_space(4.0);
+        ui.heading(egui::RichText::new("热词管理").size(18.0).strong());
+        ui.add_space(2.0);
         ui.separator();
+        ui.add_space(8.0);
 
-        // 全局设置
-        ui.horizontal(|ui| {
-            ui.label("全局权重:");
-            if ui.add(egui::Slider::new(&mut self.global_weight, 1.0..=5.0)).changed() {
-                modified = true;
-            }
+        // 全局权重
+        ui.label(egui::RichText::new("全局权重").size(13.0).strong());
+        ui.add_space(6.0);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("权重倍率：").size(13.0));
+                if ui.add(egui::Slider::new(&mut self.global_weight, 1.0..=5.0)
+                    .fixed_decimals(1)).changed() { modified = true; }
+            });
+            ui.label(egui::RichText::new("所有热词的基础权重乘数").size(11.0).color(egui::Color32::GRAY));
         });
 
-        ui.add_space(10.0);
+        ui.add_space(12.0);
 
-        // 添加新热词
+        // 添加热词
+        ui.label(egui::RichText::new("添加热词").size(13.0).strong());
+        ui.add_space(6.0);
         ui.group(|ui| {
-            ui.label("添加新热词:");
             ui.horizontal(|ui| {
-                ui.label("词汇:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.new_word)
-                        .desired_width(200.0)
-                        .hint_text("支持粘贴中文"),
-                );
-                ui.label("权重:");
-                ui.add(egui::Slider::new(&mut self.new_weight, 1.0..=5.0).text(""));
-                if ui.button("➕ 添加").clicked() && !self.new_word.is_empty() {
+                ui.label(egui::RichText::new("词汇：").size(13.0));
+                ui.add(egui::TextEdit::singleline(&mut self.new_word)
+                    .desired_width(180.0)
+                    .font(egui::TextStyle::Body)
+                    .hint_text("输入词汇…"));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("权重：").size(13.0));
+                ui.add(egui::Slider::new(&mut self.new_weight, 1.0..=5.0)
+                    .fixed_decimals(1));
+                ui.add_space(8.0);
+                let can_add = !self.new_word.is_empty();
+                if ui.add_enabled(can_add, egui::Button::new(egui::RichText::new("添加").size(13.0))
+                    .min_size([50.0, 0.0].into())).clicked() {
                     self.hotwords.insert(self.new_word.clone(), self.new_weight);
                     self.new_word.clear();
                     self.new_weight = 2.5;
                     modified = true;
                 }
             });
-            ui.label("💡 提示：可使用 Ctrl+V 粘贴，或使用下方文件导入功能");
         });
 
-        ui.add_space(10.0);
+        ui.add_space(12.0);
 
         // 热词列表
-        ui.label(format!("热词列表 ({} 个):", self.hotwords.len()));
-
-        egui::ScrollArea::vertical()
-            .max_height(400.0)
-            .show(ui, |ui| {
-                // 简化表格实现
-                let mut words: Vec<_> = self.hotwords.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                words.sort_by(|a, b| a.0.cmp(&b.0));
-
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("词汇").strong());
-                    ui.add_space(150.0);
-                    ui.label(egui::RichText::new("权重").strong());
-                    ui.add_space(100.0);
-                    ui.label(egui::RichText::new("操作").strong());
-                });
-
-                ui.separator();
-
-                let mut updates: Vec<(String, f32)> = Vec::new();
-
-                for (word, weight) in words {
-                    ui.horizontal(|ui| {
-                        ui.label(&word);
-                        ui.add_space(150.0 - word.len() as f32 * 7.0);
-                        let mut w = weight;
-                        if ui.add(egui::Slider::new(&mut w, 1.0..=5.0).fixed_decimals(1)).changed() {
-                            updates.push((word.clone(), w));
-                        }
-                        ui.add_space(20.0);
-                        if ui.button("🗑").clicked() {
-                            self.to_delete = Some(word.clone());
-                            modified = true;
-                        }
-                    });
-                }
-
-                // 应用权重更新
-                for (word, weight) in updates {
-                    if let Some(entry) = self.hotwords.get_mut(&word) {
-                        *entry = weight;
-                        modified = true;
-                    }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("热词列表（{} 个）", self.hotwords.len())).size(13.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(egui::RichText::new("清空全部").size(12.0)).clicked() {
+                    self.hotwords.clear();
+                    modified = true;
+                    self.status_msg = "已清空所有热词".to_string();
                 }
             });
+        });
+        ui.add_space(6.0);
 
-        // 处理删除
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(100, 100, 100)))
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::same(6))
+            .show(ui, |ui| {
+                // 表头
+                egui::Grid::new("hw_header")
+                    .num_columns(3)
+                    .min_col_width(160.0)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("词汇").size(12.0).strong().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new("权重").size(12.0).strong().color(egui::Color32::GRAY));
+                        ui.label(egui::RichText::new("操作").size(12.0).strong().color(egui::Color32::GRAY));
+                        ui.end_row();
+                    });
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        let mut words: Vec<_> = self.hotwords.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                        words.sort_by(|a, b| a.0.cmp(&b.0));
+                        let mut updates: Vec<(String, f32)> = Vec::new();
+
+                        egui::Grid::new("hw_list")
+                            .num_columns(3)
+                            .min_col_width(160.0)
+                            .spacing([8.0, 6.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for (word, weight) in &words {
+                                    ui.label(egui::RichText::new(word).size(13.0));
+                                    let mut w = *weight;
+                                    if ui.add(egui::Slider::new(&mut w, 1.0..=5.0)
+                                        .fixed_decimals(1)).changed() {
+                                        updates.push((word.clone(), w));
+                                    }
+                                    if ui.button(egui::RichText::new("删除").size(12.0)).clicked() {
+                                        self.to_delete = Some(word.clone());
+                                        modified = true;
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+
+                        for (word, weight) in updates {
+                            if let Some(entry) = self.hotwords.get_mut(&word) {
+                                *entry = weight;
+                                modified = true;
+                            }
+                        }
+                    });
+            });
+
         if let Some(word) = self.to_delete.take() {
             self.hotwords.remove(&word);
         }
 
-        ui.add_space(10.0);
+        ui.add_space(12.0);
 
-        // 文件导入功能
+        // 导入导出
+        ui.label(egui::RichText::new("导入 / 导出").size(13.0).strong());
+        ui.add_space(6.0);
         ui.group(|ui| {
-            ui.label("📁 从文件导入热词:");
             ui.horizontal(|ui| {
-                ui.label("文件路径:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.import_file_path)
-                        .desired_width(300.0)
-                        .hint_text("/path/to/hotwords.txt"),
-                );
-                if ui.button("导入").clicked() {
-                    let path = self.import_file_path.clone(); // 避免借用冲突
+                ui.label(egui::RichText::new("文件路径：").size(13.0));
+                ui.add(egui::TextEdit::singleline(&mut self.import_file_path)
+                    .desired_width(260.0)
+                    .font(egui::TextStyle::Body)
+                    .hint_text("/path/to/hotwords.txt"));
+                ui.add_space(8.0);
+                if ui.button(egui::RichText::new("导入").size(13.0)).clicked() {
+                    let path = self.import_file_path.clone();
                     match self.import_from_file(&path) {
-                        Ok(count) => {
-                            self.import_status = format!("✅ 成功导入 {} 个热词", count);
-                            modified = true;
-                        }
-                        Err(e) => {
-                            self.import_status = format!("❌ 导入失败: {}", e);
-                        }
+                        Ok(n)  => { self.status_msg = format!("已导入 {} 个热词", n); modified = true; }
+                        Err(e) => { self.status_msg = format!("导入失败：{}", e); }
+                    }
+                }
+                ui.add_space(4.0);
+                if ui.button(egui::RichText::new("导出").size(13.0)).clicked() {
+                    match self.export_to_file() {
+                        Ok(p)  => { self.status_msg = format!("已导出到：{}", p); }
+                        Err(e) => { self.status_msg = format!("导出失败：{}", e); }
                     }
                 }
             });
-
-            // 显示导入状态
-            if !self.import_status.is_empty() {
-                ui.label(&self.import_status);
+            if !self.status_msg.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(&self.status_msg).size(12.0)
+                    .color(egui::Color32::from_rgb(80, 160, 80)));
             }
-
-            // 文件格式说明
-            ui.collapsing("文件格式说明", |ui| {
-                ui.label("支持两种格式:");
-                ui.label("1. 简单格式（每行一个词，使用默认权重 2.5）:");
-                ui.code("深度操作系统\n语音输入法\n离线识别");
-                ui.add_space(5.0);
-                ui.label("2. 完整格式（词 + 权重，空格分隔）:");
-                ui.code("深度操作系统 3.0\n语音输入法 2.5\n离线识别 3.5");
-            });
-        });
-
-        ui.add_space(10.0);
-
-        // 导入/导出按钮
-        ui.horizontal(|ui| {
-            if ui.button("💾 导出到文件").clicked() {
-                match self.export_to_file() {
-                    Ok(path) => {
-                        self.import_status = format!("✅ 已导出到: {}", path);
-                    }
-                    Err(e) => {
-                        self.import_status = format!("❌ 导出失败: {}", e);
-                    }
-                }
-            }
-            if ui.button("🗑 清空全部").clicked() {
-                self.hotwords.clear();
-                modified = true;
-                self.import_status = "✅ 已清空所有热词".to_string();
-            }
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("文件格式：每行一个词，可选权重，如「深度操作系统 3.0」").size(11.0)
+                .color(egui::Color32::GRAY));
         });
 
         modified

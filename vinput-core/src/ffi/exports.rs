@@ -302,9 +302,7 @@ impl VInputCoreState {
 
                                 tracing::info!("✨ 完整结果上屏完成");
                             }
-
-                            // 重置 Pipeline 准备下一句
-                            let _ = pipe.reset();
+                            // get_final_result_with_punctuation() 内部已重置 pipeline，无需再次调用 reset()
                             tracing::info!("🔄 Pipeline 已重置，准备接收下一句");
                         }
                     }

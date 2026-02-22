@@ -31,7 +31,7 @@ pub struct SileroVADConfig {
 impl Default for SileroVADConfig {
     fn default() -> Self {
         Self {
-            model_path: "models/vad/silero_vad_v5.onnx".to_string(),
+            model_path: "models/silero-vad/silero_vad.onnx".to_string(),
             sample_rate: 16000,
             threshold: 0.5,
             min_speech_duration_ms: 250,
@@ -139,35 +139,53 @@ impl SileroVAD {
     ///
     /// 输入：
     /// - samples: 音频样本 (f32, [-1.0, 1.0])
-    /// - 对于 16kHz: 512 samples (32ms)
-    /// - 对于 8kHz: 256 samples (32ms)
+    /// - 对于 16kHz: 256 samples (16ms) 或 512 samples (32ms，内部拆分为 2×256)
+    /// - 对于 8kHz: 128 samples (16ms) 或 256 samples (32ms，内部拆分为 2×128)
     ///
     /// 输出：
     /// - speech_prob: 语音概率 [0.0, 1.0]
     ///
-    /// Phase 1: 完整的 ONNX Runtime 推理
+    /// 注意：Silero VAD v6.2 ONNX 模型内部使用 STFT 窗口=256，因此每次推理
+    /// 需要恰好 256 个样本（16kHz）。接受 512 样本时，内部拆分为 2×256 并取最大概率。
     pub fn process_chunk(&mut self, samples: &[f32]) -> VInputResult<f32> {
-        // 验证输入长度
-        let expected_len = if self.config.sample_rate == 16000 {
-            512
-        } else {
+        // Silero v6.2 ONNX 模型需要 256 样本/推理（STFT window=256）
+        // 接受 256 或 512 样本，512 时内部拆分
+        let sub_chunk_size = if self.config.sample_rate == 16000 {
             256
+        } else {
+            128
         };
 
-        if samples.len() != expected_len {
-            return Err(VInputError::AsrInference(format!(
-                "Invalid chunk size: {}. Expected {} for {} Hz",
+        if samples.len() == sub_chunk_size {
+            // 直接单次推理
+            self.run_inference_sub_chunk(samples)
+        } else if samples.len() == sub_chunk_size * 2 {
+            // 拆分为 2 个子块，取最大语音概率
+            let p1 = self.run_inference_sub_chunk(&samples[..sub_chunk_size])?;
+            let p2 = self.run_inference_sub_chunk(&samples[sub_chunk_size..])?;
+            tracing::trace!("VAD split inference: p1={:.3}, p2={:.3}", p1, p2);
+            Ok(p1.max(p2))
+        } else {
+            Err(VInputError::AsrInference(format!(
+                "Invalid chunk size: {}. Expected {} or {} for {} Hz",
                 samples.len(),
-                expected_len,
+                sub_chunk_size,
+                sub_chunk_size * 2,
                 self.config.sample_rate
-            )));
+            )))
         }
+    }
 
-        // 准备输入张量
-        // 顺序（经 ONNX 解析确认）：input, state, sr
+    /// 对 256 样本（16kHz）执行单次 ONNX 推理
+    ///
+    /// Silero v6.2 内部以 256 样本为单位处理：
+    /// - STFT window=256 → T=1 帧
+    /// - CNN encoder 输出 [1, 128, 1]（3D）→ LSTM 接受正确形状
+    /// 若传入 512 样本，STFT 产生 T=2 帧，CNN 输出变为 4D 导致 prob≈0.001
+    fn run_inference_sub_chunk(&mut self, samples: &[f32]) -> VInputResult<f32> {
         use ort::inputs;
 
-        // input: [1, T] f32
+        // input: [1, T] f32，T=256 for 16kHz
         let input_tensor = Value::from_array((vec![1usize, samples.len()], samples.to_vec()))
             .map_err(|e| VInputError::VadInference(format!("Failed to create input tensor: {}", e)))?;
 
@@ -184,10 +202,8 @@ impl SileroVAD {
             .run(inputs![input_tensor, state_tensor, sr_tensor])
             .map_err(|e| VInputError::VadInference(format!("Inference failed: {}", e)))?;
 
-        // 提取输出
         // outputs[0]: "output"  [batch, 1] f32 → speech probability
-        // outputs[1]: "stateN"  [2, batch, 128] f32 → updated state
-
+        // outputs[1]: "stateN"  [2, batch, 128] f32 → updated LSTM state
         let speech_prob_tensor = &outputs[0];
         let (_shape, speech_prob_data) = speech_prob_tensor
             .try_extract_tensor::<f32>()
@@ -284,7 +300,7 @@ impl SileroVAD {
 
 // Phase 1 实现完成：
 // ✅ 集成 ort crate (ONNX Runtime Rust 绑定)
-// ✅ 加载 silero_vad_v5.onnx 模型
+// ✅ 加载 silero_vad.onnx 模型 (v6.2)
 // ✅ 管理 LSTM 隐藏状态 (h, c)
 // ✅ 执行实际的模型推理
 // ✅ 返回准确的语音概率

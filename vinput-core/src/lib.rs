@@ -26,7 +26,7 @@ pub use endpointing::{EndpointDetector, EndpointDetectorConfig, EndpointResult};
 /// 初始化日志系统
 ///
 /// 生产模式: 仅当 VINPUT_LOG=1 时启用 Error 级别到 journald
-/// 调试模式 (--features debug-logs): 完整日志
+/// 调试模式 (--features debug-logs): 完整日志，同时写入 /tmp/vinput_debug.log
 ///
 /// 注意: 此函数可以安全地多次调用（Fcitx5 会加载插件两次）
 pub fn init_logging() {
@@ -37,11 +37,31 @@ pub fn init_logging() {
         let filter = EnvFilter::try_from_env("VINPUT_LOG")
             .unwrap_or_else(|_| EnvFilter::new("warn"));
 
-        // 使用 try_init() 代替 init()，避免重复初始化时 panic
-        let _ = tracing_subscriber::registry()
-            .with(fmt::layer().with_target(false))
-            .with(filter)
-            .try_init();
+        // 同时写入 stderr 和 /tmp/vinput_debug.log（方便在非终端环境下调试）
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/vinput_debug.log")
+            .ok();
+
+        if let Some(file) = log_file {
+            let file_layer = fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file));
+
+            let _ = tracing_subscriber::registry()
+                .with(fmt::layer().with_target(false))
+                .with(file_layer)
+                .with(filter)
+                .try_init();
+        } else {
+            // 文件打开失败，只写 stderr
+            let _ = tracing_subscriber::registry()
+                .with(fmt::layer().with_target(false))
+                .with(filter)
+                .try_init();
+        }
 
         // 忽略错误（说明已经初始化过了）
     }

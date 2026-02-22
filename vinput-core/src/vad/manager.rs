@@ -22,10 +22,6 @@ pub struct VadResult {
     pub speech_prob: f32,
     /// Pre-roll 音频数据（仅在状态转换为 Speech 时有效）
     pub pre_roll_audio: Option<Vec<f32>>,
-    /// 是否通过 Energy Gate
-    pub passed_energy_gate: bool,
-    /// 是否通过 Transient Filter
-    pub passed_transient_filter: bool,
 }
 
 /// VAD 管理器（集成所有组件）
@@ -149,7 +145,7 @@ impl VadManager {
 
         // 4. Transient Filter - 短爆发过滤
         let is_speech = matches!(state, VadState::Speech | VadState::SpeechCandidate);
-        let passed_transient_filter = self.transient_filter.process(samples, is_speech);
+        let _passed_transient_filter = self.transient_filter.process(samples, is_speech);
 
         // 5. Pre-roll Buffer 管理
         let mut pre_roll_audio = None;
@@ -189,8 +185,6 @@ impl VadManager {
             state_changed,
             speech_prob,
             pre_roll_audio,
-            passed_energy_gate,
-            passed_transient_filter,
         })
     }
 
@@ -270,7 +264,7 @@ impl VadManager {
         let (state, state_changed) = self.hysteresis.process(speech_prob);
 
         let is_speech = matches!(state, VadState::Speech | VadState::SpeechCandidate);
-        let passed_transient_filter = self.transient_filter.process(samples, is_speech);
+        let _passed_transient_filter = self.transient_filter.process(samples, is_speech);
 
         let mut pre_roll_audio = None;
         if matches!(state, VadState::Silence | VadState::SpeechCandidate) {
@@ -286,8 +280,6 @@ impl VadManager {
             state_changed,
             speech_prob,
             pre_roll_audio,
-            passed_energy_gate,
-            passed_transient_filter,
         })
     }
 
@@ -319,7 +311,7 @@ mod tests {
 
         let result = manager.process(&speech).expect("Failed to process");
 
-        assert!(result.passed_energy_gate);
+        assert!(result.speech_prob > 0.0);
         assert_eq!(manager.state(), result.state);
     }
 

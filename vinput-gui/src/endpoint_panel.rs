@@ -3,20 +3,17 @@
 use crate::config::VInputConfig;
 use eframe::egui;
 
-/// 端点检测配置面板
 pub struct EndpointPanel {
-    /// 最小语音长度（毫秒）
     min_speech_duration_ms: u64,
-    /// 最大语音长度（毫秒）
     max_speech_duration_ms: u64,
-    /// 尾部静音时间（毫秒）
     trailing_silence_ms: u64,
-    /// 强制超时（毫秒）
     force_timeout_ms: u64,
-    /// VAD 辅助检测
     vad_assisted: bool,
-    /// 静音确认帧数
     vad_silence_confirm_frames: usize,
+    vad_start_threshold: f32,
+    vad_end_threshold: f32,
+    vad_min_speech_duration: u64,
+    vad_min_silence_duration: u64,
 }
 
 impl EndpointPanel {
@@ -28,10 +25,13 @@ impl EndpointPanel {
             force_timeout_ms: config.endpoint.force_timeout_ms,
             vad_assisted: config.endpoint.vad_assisted,
             vad_silence_confirm_frames: config.endpoint.vad_silence_confirm_frames,
+            vad_start_threshold: config.vad.start_threshold,
+            vad_end_threshold: config.vad.end_threshold,
+            vad_min_speech_duration: config.vad.min_speech_duration,
+            vad_min_silence_duration: config.vad.min_silence_duration,
         }
     }
 
-    /// 应用配置到 VInputConfig
     pub fn apply_to_config(&self, config: &mut VInputConfig) {
         config.endpoint.min_speech_duration_ms = self.min_speech_duration_ms;
         config.endpoint.max_speech_duration_ms = self.max_speech_duration_ms;
@@ -39,196 +39,154 @@ impl EndpointPanel {
         config.endpoint.force_timeout_ms = self.force_timeout_ms;
         config.endpoint.vad_assisted = self.vad_assisted;
         config.endpoint.vad_silence_confirm_frames = self.vad_silence_confirm_frames;
+        config.vad.start_threshold = self.vad_start_threshold;
+        config.vad.end_threshold = self.vad_end_threshold;
+        config.vad.min_speech_duration = self.vad_min_speech_duration;
+        config.vad.min_silence_duration = self.vad_min_silence_duration;
     }
 
-    /// 显示 UI 并返回是否修改
     pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
         let mut modified = false;
 
-        ui.heading("🎯 智能端点检测");
-        ui.label("自动识别语音开始和结束，实现智能断句上屏");
+        ui.add_space(4.0);
+        ui.heading(egui::RichText::new("端点检测").size(18.0).strong());
+        ui.add_space(2.0);
         ui.separator();
+        ui.add_space(8.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // === 基础设置 ===
+            // 断句延迟
+            ui.label(egui::RichText::new("断句延迟").size(13.0).strong());
+            ui.add_space(6.0);
             ui.group(|ui| {
-                ui.heading("📌 基础设置");
-                ui.add_space(10.0);
+                ui.label(egui::RichText::new("停顿多久后自动上屏（越短越快，越长越稳）").size(12.0).color(egui::Color32::GRAY));
+                ui.add_space(6.0);
 
-                // VAD 辅助检测
+                let mut v = self.trailing_silence_ms as f32;
+                if ui.add(egui::Slider::new(&mut v, 400.0..=2000.0).suffix(" ms").text("")).changed() {
+                    self.trailing_silence_ms = v as u64;
+                    modified = true;
+                }
+
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut self.vad_assisted, "启用 VAD 辅助检测").changed() {
-                        modified = true;
+                    ui.label(egui::RichText::new("快速预设：").size(12.0));
+                    for (label, val) in [("快速 600ms", 600u64), ("平衡 800ms ⭐", 800), ("稳定 1000ms", 1000), ("保守 1500ms", 1500)] {
+                        if ui.add_sized([90.0, 24.0], egui::SelectableLabel::new(
+                            self.trailing_silence_ms == val,
+                            egui::RichText::new(label).size(12.0),
+                        )).clicked() {
+                            self.trailing_silence_ms = val;
+                            modified = true;
+                        }
+                        ui.add_space(2.0);
                     }
-                    ui.label("✅ 推荐启用，提高检测准确性");
                 });
-
-                ui.add_space(5.0);
             });
 
-            ui.add_space(15.0);
+            ui.add_space(12.0);
 
-            // === 断句延迟设置 ===
+            // 噪声过滤
+            ui.label(egui::RichText::new("噪声过滤").size(13.0).strong());
+            ui.add_space(6.0);
             ui.group(|ui| {
-                ui.heading("⏱️ 断句延迟（最重要）");
-                ui.add_space(10.0);
+                egui::Grid::new("endpoint_noise_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 10.0])
+                    .min_col_width(120.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("最小语音长度").size(13.0));
+                        let mut v = self.min_speech_duration_ms as f32;
+                        if ui.add(egui::Slider::new(&mut v, 100.0..=1000.0).suffix(" ms")).changed() {
+                            self.min_speech_duration_ms = v as u64;
+                            modified = true;
+                        }
+                        ui.end_row();
 
-                ui.label("尾部静音确认时间：");
-                ui.label("  停顿多久后自动断句上屏");
+                        ui.label(egui::RichText::new("静音确认帧数").size(13.0));
+                        let mut v = self.vad_silence_confirm_frames as f32;
+                        if ui.add(egui::Slider::new(&mut v, 2.0..=10.0)
+                            .suffix(&format!(" 帧 ≈{}ms", self.vad_silence_confirm_frames * 32))).changed() {
+                            self.vad_silence_confirm_frames = v as usize;
+                            modified = true;
+                        }
+                        ui.end_row();
 
-                let mut trailing_silence_ms_f = self.trailing_silence_ms as f32;
-                ui.add_space(5.0);
-                if ui.add(
-                    egui::Slider::new(&mut trailing_silence_ms_f, 400.0..=2000.0)
-                        .text("毫秒")
-                        .suffix(" ms")
-                ).changed() {
-                    self.trailing_silence_ms = trailing_silence_ms_f as u64;
-                    modified = true;
-                }
-
-                ui.add_space(10.0);
-
-                // 预设按钮
-                ui.horizontal(|ui| {
-                    ui.label("快速选择：");
-                    if ui.button("快速 (600ms)").clicked() {
-                        self.trailing_silence_ms = 600;
-                        modified = true;
-                    }
-                    if ui.button("平衡 (800ms) ⭐").clicked() {
-                        self.trailing_silence_ms = 800;
-                        modified = true;
-                    }
-                    if ui.button("稳定 (1000ms)").clicked() {
-                        self.trailing_silence_ms = 1000;
-                        modified = true;
-                    }
-                    if ui.button("保守 (1500ms)").clicked() {
-                        self.trailing_silence_ms = 1500;
-                        modified = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-
-                // 说明
-                ui.label(format!("当前设置: {}ms", self.trailing_silence_ms));
-                let desc = match self.trailing_silence_ms {
-                    0..=600 => "⚡ 极快响应，但可能误断句",
-                    601..=900 => "✅ 平衡模式，推荐使用",
-                    901..=1200 => "🛡️ 稳定模式，减少误断",
-                    _ => "🐢 保守模式，断句较慢",
-                };
-                ui.label(desc);
+                        ui.label(egui::RichText::new("VAD 辅助检测").size(13.0));
+                        if ui.checkbox(&mut self.vad_assisted, "").changed() {
+                            modified = true;
+                        }
+                        ui.end_row();
+                    });
+                ui.label(egui::RichText::new("最小语音长度：短于此时长的音频视为噪声忽略").size(11.0).color(egui::Color32::GRAY));
             });
 
-            ui.add_space(15.0);
+            ui.add_space(12.0);
 
-            // === 噪声过滤 ===
+            // VAD 参数
+            ui.label(egui::RichText::new("VAD 参数").size(13.0).strong());
+            ui.add_space(6.0);
             ui.group(|ui| {
-                ui.heading("🔇 噪声过滤");
-                ui.add_space(10.0);
+                egui::Grid::new("vad_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 10.0])
+                    .min_col_width(120.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("语音启动阈值").size(13.0));
+                        if ui.add(egui::Slider::new(&mut self.vad_start_threshold, 0.0..=1.0)
+                            .fixed_decimals(2)).changed() { modified = true; }
+                        ui.end_row();
 
-                ui.label("最小语音长度：");
-                ui.label("  短于此时长的音频会被忽略（过滤点击音、咳嗽等）");
+                        ui.label(egui::RichText::new("静音结束阈值").size(13.0));
+                        if ui.add(egui::Slider::new(&mut self.vad_end_threshold, 0.0..=1.0)
+                            .fixed_decimals(2)).changed() { modified = true; }
+                        ui.end_row();
 
-                let mut min_speech_ms_f = self.min_speech_duration_ms as f32;
-                ui.add_space(5.0);
-                if ui.add(
-                    egui::Slider::new(&mut min_speech_ms_f, 100.0..=1000.0)
-                        .text("毫秒")
-                        .suffix(" ms")
-                ).changed() {
-                    self.min_speech_duration_ms = min_speech_ms_f as u64;
-                    modified = true;
-                }
+                        ui.label(egui::RichText::new("最小语音时长").size(13.0));
+                        let mut v = self.vad_min_speech_duration as f32;
+                        if ui.add(egui::Slider::new(&mut v, 100.0..=1000.0).suffix(" ms")).changed() {
+                            self.vad_min_speech_duration = v as u64;
+                            modified = true;
+                        }
+                        ui.end_row();
 
-                ui.add_space(10.0);
-
-                ui.label("静音确认帧数：");
-                ui.label("  连续 N 帧静音才确认语音结束（1 帧 ≈ 32ms）");
-
-                let mut frames_f = self.vad_silence_confirm_frames as f32;
-                ui.add_space(5.0);
-                if ui.add(
-                    egui::Slider::new(&mut frames_f, 2.0..=10.0)
-                        .text("帧")
-                        .suffix(&format!(" 帧 (≈{}ms)", self.vad_silence_confirm_frames * 32))
-                ).changed() {
-                    self.vad_silence_confirm_frames = frames_f as usize;
-                    modified = true;
-                }
+                        ui.label(egui::RichText::new("最小静音时长").size(13.0));
+                        let mut v = self.vad_min_silence_duration as f32;
+                        if ui.add(egui::Slider::new(&mut v, 100.0..=1000.0).suffix(" ms")).changed() {
+                            self.vad_min_silence_duration = v as u64;
+                            modified = true;
+                        }
+                        ui.end_row();
+                    });
+                ui.label(egui::RichText::new("启动阈值越高越严格；结束阈值越低越敏感").size(11.0).color(egui::Color32::GRAY));
             });
 
-            ui.add_space(15.0);
+            ui.add_space(12.0);
 
-            // === 高级设置 ===
-            ui.collapsing("⚙️ 高级设置", |ui| {
-                ui.add_space(10.0);
+            // 高级
+            ui.collapsing(egui::RichText::new("高级设置").size(13.0), |ui| {
+                ui.add_space(6.0);
+                egui::Grid::new("endpoint_adv_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 10.0])
+                    .min_col_width(120.0)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("最大语音长度").size(13.0));
+                        let mut v = (self.max_speech_duration_ms / 1000) as f32;
+                        if ui.add(egui::Slider::new(&mut v, 10.0..=180.0).suffix(" 秒")).changed() {
+                            self.max_speech_duration_ms = (v * 1000.0) as u64;
+                            modified = true;
+                        }
+                        ui.end_row();
 
-                // 最大语音长度
-                ui.label("最大语音长度（自动分段）：");
-                let mut max_speech_sec_f = (self.max_speech_duration_ms / 1000) as f32;
-                ui.add_space(5.0);
-                if ui.add(
-                    egui::Slider::new(&mut max_speech_sec_f, 10.0..=180.0)
-                        .text("秒")
-                        .suffix(" 秒")
-                ).changed() {
-                    self.max_speech_duration_ms = (max_speech_sec_f * 1000.0) as u64;
-                    modified = true;
-                }
-
-                ui.add_space(10.0);
-
-                // 强制超时
-                ui.label("强制超时：");
-                let mut timeout_sec_f = (self.force_timeout_ms / 1000) as f32;
-                ui.add_space(5.0);
-                if ui.add(
-                    egui::Slider::new(&mut timeout_sec_f, 10.0..=300.0)
-                        .text("秒")
-                        .suffix(" 秒")
-                ).changed() {
-                    self.force_timeout_ms = (timeout_sec_f * 1000.0) as u64;
-                    modified = true;
-                }
-            });
-
-            ui.add_space(15.0);
-
-            // === 配置总结 ===
-            ui.group(|ui| {
-                ui.heading("📊 当前配置总结");
-                ui.add_space(10.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("断句延迟：");
-                    ui.label(format!("{}ms", self.trailing_silence_ms));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("最小语音长度：");
-                    ui.label(format!("{}ms", self.min_speech_duration_ms));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("静音确认：");
-                    ui.label(format!("{} 帧 (≈{}ms)", 
-                        self.vad_silence_confirm_frames,
-                        self.vad_silence_confirm_frames * 32));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("自动分段：");
-                    ui.label(format!("{} 秒", self.max_speech_duration_ms / 1000));
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("VAD 辅助：");
-                    ui.label(if self.vad_assisted { "✅ 启用" } else { "❌ 禁用" });
-                });
+                        ui.label(egui::RichText::new("强制超时").size(13.0));
+                        let mut v = (self.force_timeout_ms / 1000) as f32;
+                        if ui.add(egui::Slider::new(&mut v, 10.0..=300.0).suffix(" 秒")).changed() {
+                            self.force_timeout_ms = (v * 1000.0) as u64;
+                            modified = true;
+                        }
+                        ui.end_row();
+                    });
             });
         });
 

@@ -117,6 +117,36 @@ impl RuleLayer {
         LOGIC_WORDS.contains(&word)
     }
 
+    /// 在完整文本中扫描逻辑连接词，返回逗号插入的字符位置列表
+    ///
+    /// 用于最终结果处理：Paraformer 输出字符级 token，无法用 is_logic_word 逐 token
+    /// 检测多字词（如"所以"会被拆成"所"+"以"两个 token）。
+    /// 此函数直接在拼合后的纯文本上做子串搜索，绕过 token 粒度限制。
+    ///
+    /// # 参数
+    /// - `text`: 不含标点的纯文本
+    /// - `min_preceding_chars`: 逻辑词前至少需要的字符数（避免句首插逗号）
+    pub fn find_logic_comma_positions(text: &str, min_preceding_chars: usize) -> Vec<usize> {
+        let mut positions = Vec::new();
+
+        for &word in LOGIC_WORDS {
+            let mut search_start_byte = 0;
+            while let Some(rel_byte_pos) = text[search_start_byte..].find(word) {
+                let abs_byte_pos = search_start_byte + rel_byte_pos;
+                // 将字节偏移转换为字符偏移（逗号插在逻辑词之前）
+                let char_pos = text[..abs_byte_pos].chars().count();
+                if char_pos >= min_preceding_chars {
+                    positions.push(char_pos);
+                }
+                search_start_byte = abs_byte_pos + word.len();
+            }
+        }
+
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+    }
+
     /// 更新配置
     pub fn update_profile(&mut self, profile: StyleProfile) {
         self.profile = profile;

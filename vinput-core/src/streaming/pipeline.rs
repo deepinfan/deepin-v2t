@@ -88,6 +88,23 @@ pub struct StreamingPipeline {
     total_frames: u64,
     /// 送入 ASR 的音频帧数
     asr_frames: u64,
+
+    // ── VAD 停顿检测（帧计数法，与墙上时钟无关，测试/生产均适用）──────────────
+    /// VAD 检测到的停顿逗号插入位置（部分结果字符数，在停顿达到阈值时快照）
+    ///
+    /// 直接使用字符计数而非 ms 时间戳，避免 token.start_time_ms（均匀 200ms/字）
+    /// 与 asr_frames*32ms（真实音频时间）之间的时间系统不对齐问题。
+    vad_pause_char_positions: Vec<usize>,
+    /// 上一帧是否为 VAD 语音帧
+    vad_prev_is_speech: bool,
+    /// 最后一个语音帧送入 ASR 后的 asr_frames 值（保留用于日志）
+    vad_last_speech_asr_frame: u64,
+    /// 连续非语音帧计数（帧计数，1 帧 = 32ms 音频时间）
+    vad_silence_frame_count: u64,
+    /// 当前停顿是否已记录过逗号位置（防止同一停顿重复记录）
+    vad_comma_recorded_for_pause: bool,
+    /// 上一帧的 ASR 部分结果字符数（停顿发生时用于定位逗号位置）
+    last_partial_char_count: usize,
 }
 
 impl StreamingPipeline {
@@ -119,6 +136,12 @@ impl StreamingPipeline {
             asr_endpoint_grace_remaining: 0,
             total_frames: 0,
             asr_frames: 0,
+            vad_pause_char_positions: Vec::new(),
+            vad_prev_is_speech: false,
+            vad_last_speech_asr_frame: 0,
+            vad_silence_frame_count: 0,
+            vad_comma_recorded_for_pause: false,
+            last_partial_char_count: 0,
         })
     }
 
@@ -196,10 +219,13 @@ impl StreamingPipeline {
                                     pre_roll_audio,
                                     self.config.vad_config.silero.sample_rate as i32,
                                 );
-                                self.asr_frames += 1;
+                                // 按实际帧数计数（512 samples/帧），而非固定 +1
+                                // 这样 asr_frames * 32ms 与 token 的 start_time_ms 保持对齐
+                                self.asr_frames += (pre_roll_audio.len() as u64 + 511) / 512;
                                 tracing::info!(
-                                    "✅ 注入 Pre-roll 音频: {} 样本",
-                                    pre_roll_audio.len()
+                                    "✅ 注入 Pre-roll 音频: {} 样本 ({} 帧)",
+                                    pre_roll_audio.len(),
+                                    (pre_roll_audio.len() as u64 + 511) / 512,
                                 );
                             }
                         }
@@ -228,6 +254,90 @@ impl StreamingPipeline {
             }
         }
 
+        // 3.5 VAD 停顿检测（帧计数法）
+        //
+        // 不依赖墙上时钟（Instant::now()），1 帧 = 512 samples = 32ms 音频时间。
+        // 在快速回放测试和实时生产环境中行为完全一致。
+        //
+        // 算法：
+        //   - 连续非语音帧 >= COMMA_PAUSE_MIN_FRAMES (320ms) 视为停顿
+        //   - 停顿结束（语音恢复）时，记录停顿前最后一个语音帧对应的音频时刻
+        //   - 在 get_final_result_with_punctuation() 中通过 token.start_time_ms 比较
+        //     找到对应的词边界并插入逗号
+        const COMMA_PAUSE_MIN_FRAMES: u64 = 10; // 10 × 32ms = 320ms
+        if self.pipeline_state == PipelineState::Recognizing {
+            let is_vad_speech = matches!(
+                vad_result.state,
+                VadState::Speech | VadState::SpeechCandidate
+            );
+
+            if is_vad_speech {
+                // 检测停顿结束：从非语音恢复到语音（用于日志，不再用于逗号记录）
+                if !self.vad_prev_is_speech && self.vad_silence_frame_count >= COMMA_PAUSE_MIN_FRAMES {
+                    let pause_ms = self.vad_silence_frame_count * 32;
+                    tracing::info!(
+                        "🔤 VAD 停顿结束: {}ms ({}帧), 语音恢复，逗号已在阈值时记录",
+                        pause_ms, self.vad_silence_frame_count
+                    );
+                } else if !self.vad_prev_is_speech && self.vad_silence_frame_count > 0 {
+                    tracing::debug!(
+                        "  语音恢复: 停顿 {}帧 ({}ms)，不足 {} 帧，不插逗号",
+                        self.vad_silence_frame_count,
+                        self.vad_silence_frame_count * 32,
+                        COMMA_PAUSE_MIN_FRAMES
+                    );
+                }
+                // 记录当前语音帧对应的 asr_frames（日志用）
+                self.vad_last_speech_asr_frame = self.asr_frames;
+                self.vad_silence_frame_count = 0;
+                self.vad_comma_recorded_for_pause = false; // 语音恢复时重置标志
+                self.vad_prev_is_speech = true;
+            } else {
+                self.vad_silence_frame_count += 1;
+                self.vad_prev_is_speech = false;
+                // 静音达到或超过阈值后，在更新窗口内持续更新逗号候选位置：
+                // - ASR 产出比 VAD 慢约一个批次（~19帧×32ms=608ms）
+                // - 需要在停顿期间等待 ASR 追赶，记录正确的词边界位置
+                // - 更新窗口 COMMA_PAUSE_MIN_FRAMES ... COMMA_PAUSE_MIN_FRAMES+UPDATE_WINDOW
+                const UPDATE_WINDOW: u64 = 30; // 30×32ms=960ms，覆盖约 1.5 个 ASR 批次
+                if self.vad_silence_frame_count >= COMMA_PAUSE_MIN_FRAMES {
+                    let frames_over_min = self.vad_silence_frame_count - COMMA_PAUSE_MIN_FRAMES;
+                    if frames_over_min <= UPDATE_WINDOW {
+                        let char_pos = self.last_partial_char_count;
+                        if self.vad_silence_frame_count == COMMA_PAUSE_MIN_FRAMES {
+                            tracing::info!(
+                                "⏸️  VAD 停顿达到逗号阈值: {}帧 ({}ms), 当前部分结果字符数={}, grace={}",
+                                self.vad_silence_frame_count,
+                                self.vad_silence_frame_count * 32,
+                                char_pos,
+                                self.asr_endpoint_grace_remaining
+                            );
+                        }
+                        if char_pos >= 4 {
+                            if !self.vad_comma_recorded_for_pause {
+                                // 首次满足条件：新建条目
+                                tracing::info!(
+                                    "✏️  VAD 逗号位置初次记录: char_pos={} (停顿 {}帧 = {}ms)",
+                                    char_pos, self.vad_silence_frame_count,
+                                    self.vad_silence_frame_count * 32
+                                );
+                                self.vad_pause_char_positions.push(char_pos);
+                                self.vad_comma_recorded_for_pause = true;
+                            } else if char_pos > *self.vad_pause_char_positions.last().unwrap() {
+                                // ASR 在停顿期间解码了更多字符：更新位置（更精确的词边界）
+                                tracing::info!(
+                                    "✏️  VAD 逗号位置更新: {} → {} (停顿 {}帧)",
+                                    self.vad_pause_char_positions.last().unwrap(),
+                                    char_pos, self.vad_silence_frame_count
+                                );
+                                *self.vad_pause_char_positions.last_mut().unwrap() = char_pos;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 4. 执行 ASR 解码（如果流准备好）并检查 ASR 端点
         if self.pipeline_state == PipelineState::Recognizing {
             if let Some(stream) = &mut self.asr_stream {
@@ -238,14 +348,17 @@ impl StreamingPipeline {
                 if self.asr_endpoint_grace_remaining > 0 {
                     // 处于 ASR endpoint 缓冲期：继续喂音频，倒计时
                     self.asr_endpoint_grace_remaining -= 1;
+                    tracing::debug!(
+                        "Pipeline: ASR 端点缓冲期剩余 {} 帧, vad_silence={}, vad_prev_speech={}",
+                        self.asr_endpoint_grace_remaining,
+                        self.vad_silence_frame_count,
+                        self.vad_prev_is_speech
+                    );
                     if self.asr_endpoint_grace_remaining == 0 {
                         // 缓冲期结束：刷新并提交
                         stream.input_finished();
                         self.pipeline_state = PipelineState::Completed;
                         tracing::info!("Pipeline: ASR 端点缓冲期结束，准备上屏");
-                    } else {
-                        // 缓冲期内继续喂音频（已在上方的 Recognizing 分支处理）
-                        tracing::debug!("Pipeline: ASR 端点缓冲期剩余 {} 帧", self.asr_endpoint_grace_remaining);
                     }
                 } else {
                     // 正常检查 ASR 端点（只在缓冲期外检查，避免重复触发）
@@ -279,7 +392,19 @@ impl StreamingPipeline {
         // 6. 分离稳定和不稳定文本
         let (stable_text, unstable_text) = self.split_stable_unstable(&partial_result);
 
-        // 7. 检测是否应该添加逗号（停顿检测）
+        // 7. 更新部分结果字符数（用于 VAD 停顿时定位逗号位置）
+        if self.pipeline_state == PipelineState::Recognizing && !partial_result.is_empty() {
+            let new_count = partial_result.chars().count();
+            if new_count != self.last_partial_char_count {
+                tracing::debug!(
+                    "ASR 部分结果更新: {} → {} 字符 (vad_silence={}帧)",
+                    self.last_partial_char_count, new_count, self.vad_silence_frame_count
+                );
+            }
+            self.last_partial_char_count = new_count;
+        }
+
+        // 8. 检测是否应该添加逗号（停顿检测）
         let should_add_comma = false; // TODO: 实现停顿检测逻辑
 
         Ok(StreamingResult {
@@ -335,13 +460,45 @@ impl StreamingPipeline {
         self.pipeline_state = PipelineState::Idle;
         self.speech_start_time = None;
         self.asr_endpoint_grace_remaining = 0;
+        // asr_frames 必须归零：ASR token 时间戳从每条新流的 0ms 开始，
+        // 若不归零则 VAD 停顿时刻与 token 时间戳对不齐
+        self.asr_frames = 0;
+
+        // 重置 VAD 停顿检测状态
+        self.vad_pause_char_positions.clear();
+        self.vad_prev_is_speech = false;
+        self.vad_last_speech_asr_frame = 0;
+        self.vad_silence_frame_count = 0;
+        self.vad_comma_recorded_for_pause = false;
+        self.last_partial_char_count = 0;
 
         Ok(())
     }
 
     /// 强制设置 VAD 状态（用于 PushToTalk 模式）
+    ///
+    /// 当强制进入 Speech 状态时，立即启动 ASR 流，避免等待 Silero LSTM 预热
+    /// （Silero v6.2 需要约 20 帧 / 640ms 才能输出高置信度语音概率）。
+    /// 若不立即启动，句子开头的音频会在 Silero 预热期间被丢弃。
     pub fn force_vad_state(&mut self, state: VadState) {
         self.vad_manager.force_state(state);
+
+        // PushToTalk: 强制进入语音状态时，立即启动 ASR 流
+        if matches!(state, VadState::Speech) && self.pipeline_state == PipelineState::Idle {
+            match self.asr_recognizer.create_stream() {
+                Ok(stream) => {
+                    let stream_static: OnlineStream<'static> =
+                        unsafe { std::mem::transmute(stream) };
+                    self.asr_stream = Some(stream_static);
+                    self.pipeline_state = PipelineState::Recognizing;
+                    self.speech_start_time = Some(Instant::now());
+                    tracing::info!("PushToTalk: 立即启动 ASR 流（跳过 Silero ~20 帧预热延迟）");
+                }
+                Err(e) => {
+                    tracing::error!("PushToTalk: 创建 ASR 流失败: {}", e);
+                }
+            }
+        }
     }
 
     /// 获取当前管道状态
@@ -475,12 +632,13 @@ impl StreamingPipeline {
                         i, token.text, token.start_time_ms, token.end_time_ms, token.duration_ms());
                 }
 
-                // 第一步：构建纯文本（无逗号），同时收集逻辑连接词的逗号位置
-                // PauseEngine 的时间戳方法对 Paraformer 模型无效，跳过停顿检测
-                // 只保留 RuleLayer 的逻辑连接词逗号（如"因为"、"所以"）
+                // 第一步：构建纯文本，同时收集 VAD 停顿逗号位置
+                //
+                // 注意：逻辑连接词（所以/但是/因为…）检测【不在此循环内】做，
+                // 因为 Paraformer 输出字符级 token，"所以"会拆成"所"+"以"两个
+                // token，逐 token 的 is_logic_word() 永远匹配不到二字词。
+                // 改为先拼全文，再用 find_logic_comma_positions() 子串扫描。
                 let mut plain_text = String::new();
-                let mut logic_comma_positions: Vec<usize> = Vec::new(); // 逻辑词前的字符位置
-                let mut token_char_count = 0usize;
 
                 for token in &detailed_result.tokens {
                     let token_info = token.to_token_info();
@@ -488,19 +646,36 @@ impl StreamingPipeline {
                     if word.is_empty() || word == "NE" {
                         continue;
                     }
-                    // 检查逻辑连接词规则（在词【前】插入逗号，不依赖时间戳，始终有效）
-                    let is_logic_word = crate::punctuation::rules::RuleLayer::is_logic_word(&word);
-                    if is_logic_word && token_char_count >= 8 {
-                        logic_comma_positions.push(token_char_count);
-                    }
                     plain_text.push_str(&word);
-                    token_char_count += word.chars().count();
                 }
 
-                tracing::info!("📝 纯文本: '{}', 逻辑词逗号位置: {:?}",
+                // 第二步：在完整纯文本上扫描逻辑连接词（绕过字符级 token 拆分问题）
+                let mut logic_comma_positions =
+                    crate::punctuation::rules::RuleLayer::find_logic_comma_positions(
+                        &plain_text,
+                        8,
+                    );
+                if !logic_comma_positions.is_empty() {
+                    tracing::info!("  📌 逻辑词逗号位置: {:?}", logic_comma_positions);
+                }
+
+                // 合并逻辑词逗号 + VAD 停顿逗号
+                // VAD 停顿位置直接使用字符数（停顿发生时的部分结果字符计数），
+                // 不再依赖 token.start_time_ms 与 asr_frames*32ms 对齐
+                let total_chars = plain_text.chars().count();
+                let vad_comma_positions: Vec<usize> = self.vad_pause_char_positions.iter()
+                    .filter(|&&pos| pos >= 4 && pos < total_chars)
+                    .copied()
+                    .collect();
+                if !vad_comma_positions.is_empty() {
+                    tracing::info!("  🔤 VAD 停顿逗号位置: {:?} (总字数={})", vad_comma_positions, total_chars);
+                }
+                logic_comma_positions.extend(vad_comma_positions);
+
+                tracing::info!("📝 纯文本: '{}', 逗号位置(逻辑词+VAD停顿): {:?}",
                     plain_text, logic_comma_positions);
 
-                // 第二步：将逻辑连接词逗号位置插入纯文本
+                // 第三步：排序去重，插入逗号
                 let mut comma_positions = logic_comma_positions;
                 comma_positions.sort_unstable();
                 comma_positions.dedup();
