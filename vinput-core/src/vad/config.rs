@@ -52,6 +52,7 @@ fn default_hysteresis_config() -> HysteresisConfig {
         end_threshold: 0.35,
         min_speech_duration_ms: 100,
         min_silence_duration_ms: 500,
+        max_candidate_gap_frames: 2,
     }
 }
 
@@ -69,6 +70,10 @@ fn default_transient_filter_config() -> TransientFilterConfig {
         max_duration_ms: 80,
         rms_threshold: 0.05,
     }
+}
+
+fn default_max_candidate_gap_frames() -> u32 {
+    2
 }
 
 /// Silero VAD 配置
@@ -114,6 +119,12 @@ pub struct HysteresisConfig {
 
     /// 最小静音持续时间 (ms)
     pub min_silence_duration_ms: u64,
+
+    /// SpeechCandidate 状态下允许的最大低概率帧数（LSTM 抖动容错）
+    /// 每帧 32ms，默认 2 = 64ms 容错窗口。
+    /// 防止 LSTM 预热期概率抖动导致 SpeechCandidate 立即退回 Silence。
+    #[serde(default = "default_max_candidate_gap_frames")]
+    pub max_candidate_gap_frames: u32,
 }
 
 /// Pre-roll Buffer 配置
@@ -168,6 +179,7 @@ impl VadConfig {
                 end_threshold: 0.35,
                 min_speech_duration_ms: 100,
                 min_silence_duration_ms: 500,
+                max_candidate_gap_frames: 2,
             },
             pre_roll: PreRollConfig {
                 enabled: true,

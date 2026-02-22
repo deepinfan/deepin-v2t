@@ -82,12 +82,18 @@ impl HysteresisController {
                         }
                     }
                 } else {
-                    // 概率下降，返回静音
-                    self.state = VadState::Silence;
-                    self.state_enter_time = None;
-                    self.consecutive_speech_frames = 0;
+                    // 概率下降：允许最多 max_candidate_gap_frames 帧的间隙
+                    // （LSTM 预热期概率抖动容错，避免立即退回 Silence）
                     self.consecutive_silence_frames += 1;
-                    tracing::debug!("VAD: SpeechCandidate → Silence (prob={:.3})", speech_prob);
+                    if self.consecutive_silence_frames > self.config.max_candidate_gap_frames as usize {
+                        self.state = VadState::Silence;
+                        self.state_enter_time = None;
+                        self.consecutive_speech_frames = 0;
+                        self.consecutive_silence_frames = 0;
+                        tracing::debug!("VAD: SpeechCandidate → Silence (prob={:.3}, gap={}帧)",
+                            speech_prob, self.config.max_candidate_gap_frames + 1);
+                    }
+                    // else: 保持 SpeechCandidate，等待概率回升
                 }
             }
 
@@ -202,6 +208,7 @@ mod tests {
             end_threshold: 0.3,
             min_speech_duration_ms: 50,
             min_silence_duration_ms: 100,
+            max_candidate_gap_frames: 0,
         };
 
         let mut controller = HysteresisController::new(config);
@@ -226,6 +233,7 @@ mod tests {
             end_threshold: 0.3,
             min_speech_duration_ms: 50,
             min_silence_duration_ms: 100,
+            max_candidate_gap_frames: 0,
         };
 
         let mut controller = HysteresisController::new(config);
@@ -251,13 +259,43 @@ mod tests {
             end_threshold: 0.3,
             min_speech_duration_ms: 100,
             min_silence_duration_ms: 200,
+            max_candidate_gap_frames: 0,
         };
 
         let mut controller = HysteresisController::new(config);
 
         // 短暂的高概率不应该立即转为 Speech
         controller.process(0.7); // → SpeechCandidate
-        let (state, _) = controller.process(0.5); // 低于启动阈值
+        let (state, _) = controller.process(0.5); // 低于启动阈值，gap=0 时立即退回
         assert_eq!(state, VadState::Silence); // 应该返回 Silence
+    }
+
+    #[test]
+    fn test_hysteresis_candidate_gap_tolerance() {
+        let config = HysteresisConfig {
+            start_threshold: 0.6,
+            end_threshold: 0.3,
+            min_speech_duration_ms: 50,
+            min_silence_duration_ms: 100,
+            max_candidate_gap_frames: 2,
+        };
+
+        let mut controller = HysteresisController::new(config);
+
+        // 进入 SpeechCandidate
+        let (state, _) = controller.process(0.7);
+        assert_eq!(state, VadState::SpeechCandidate);
+
+        // 1 帧低概率 → 仍在 SpeechCandidate（gap=2 容忍）
+        let (state, _) = controller.process(0.4);
+        assert_eq!(state, VadState::SpeechCandidate);
+
+        // 2 帧低概率 → 仍在 SpeechCandidate（未超过容忍）
+        let (state, _) = controller.process(0.4);
+        assert_eq!(state, VadState::SpeechCandidate);
+
+        // 3 帧低概率 → 超过容忍，退回 Silence
+        let (state, _) = controller.process(0.4);
+        assert_eq!(state, VadState::Silence);
     }
 }
