@@ -199,20 +199,38 @@ impl VadManager {
         }
     }
 
-    /// 重置 VAD 状态
+    /// 软重置：保留 Silero LSTM 状态（用于同一录音会话内句子间的重置）
     #[cfg(feature = "vad-onnx")]
     pub fn reset(&mut self) {
         self.energy_gate.reset();
         self.hysteresis.reset();
         self.pre_roll_buffer.reset();
         self.transient_filter.reset();
-        self.silero_vad.reset();
+        self.silero_vad.reset();  // 软重置，LSTM 状态保留
         self.last_state = VadState::Silence;
         self.diag_frame_count = 0;
         self.diag_energy_gate_pass = 0;
         self.diag_max_prob = 0.0;
         self.diag_max_rms = 0.0;
-        tracing::debug!("VadManager reset");
+        tracing::debug!("VadManager soft reset");
+    }
+
+    /// 完整重置：清零 Silero LSTM 状态（用于新录音会话开始）
+    ///
+    /// 录音停止后 LSTM 冻结在静音模式，需要完整重置确保新会话正常预热。
+    #[cfg(feature = "vad-onnx")]
+    pub fn full_reset(&mut self) {
+        self.energy_gate.reset();
+        self.hysteresis.reset();
+        self.pre_roll_buffer.reset();
+        self.transient_filter.reset();
+        self.silero_vad.full_reset();  // 完整重置，LSTM 状态清零
+        self.last_state = VadState::Silence;
+        self.diag_frame_count = 0;
+        self.diag_energy_gate_pass = 0;
+        self.diag_max_prob = 0.0;
+        self.diag_max_rms = 0.0;
+        tracing::debug!("VadManager full reset (LSTM cleared)");
     }
 
     /// 获取当前状态

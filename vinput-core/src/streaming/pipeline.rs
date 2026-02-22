@@ -330,7 +330,37 @@ impl StreamingPipeline {
         Ok(())
     }
 
-    /// 重置管道状态
+    /// 通知管道新录音会话即将开始
+    ///
+    /// 与句子间 reset() 的区别：此方法进行完整重置（包括 Silero LSTM 状态清零），
+    /// 防止上次录音会话结束后 LSTM 冻结在静音模式，导致本次录音开始时语音被误判。
+    pub fn on_recording_started(&mut self) -> VInputResult<()> {
+        tracing::info!("Pipeline: 新录音会话开始，完整重置（含 LSTM）");
+
+        // 销毁 ASR 流
+        if let Some(mut stream) = self.asr_stream.take() {
+            stream.reset(&self.asr_recognizer);
+        }
+
+        // 完整重置 VAD（包括 LSTM 状态清零）
+        #[cfg(feature = "vad-onnx")]
+        self.vad_manager.full_reset();
+        #[cfg(not(feature = "vad-onnx"))]
+        self.vad_manager.reset();
+
+        // 重置端点检测器
+        self.endpoint_detector.reset();
+
+        // 重置状态
+        self.pipeline_state = PipelineState::Idle;
+        self.speech_start_time = None;
+        self.asr_endpoint_grace_remaining = 0;
+        self.asr_frames = 0;
+
+        Ok(())
+    }
+
+    /// 重置管道状态（句子提交后调用，保留 Silero LSTM 上下文）
     pub fn reset(&mut self) -> VInputResult<()> {
         tracing::debug!("Pipeline: Resetting");
 

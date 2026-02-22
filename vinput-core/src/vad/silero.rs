@@ -277,17 +277,28 @@ impl SileroVAD {
         Ok((self.state, state_changed))
     }
 
-    /// 重置 VAD 状态（保留 LSTM 状态）
+    /// 软重置：保留 LSTM 状态（用于同一录音会话内句子间的重置）
     ///
     /// 故意不清零 lstm_state：LSTM 已学习当前音频环境，保留上下文可
-    /// 避免每句话开头约 640ms（20帧）的预热延迟。清零会导致用户说完
-    /// 第一句继续说第二句时，句子开头的语音漏检。
+    /// 避免每句话开头约 640ms（20帧）的预热延迟。
     pub fn reset(&mut self) {
         self.state = VADState::Silence;
         self.speech_frames = 0;
         self.silence_frames = 0;
         // 不重置 lstm_state，保留 LSTM 上下文以避免冷启动延迟
         tracing::debug!("VAD soft reset (LSTM state preserved)");
+    }
+
+    /// 完整重置：清零 LSTM 状态（用于新录音会话开始）
+    ///
+    /// 录音停止后 LSTM 冻结在静音模式，下次录音时若沿用该状态会
+    /// 导致语音被误判为噪声（概率 < 0.2）。新会话必须从零开始预热。
+    pub fn full_reset(&mut self) {
+        self.state = VADState::Silence;
+        self.speech_frames = 0;
+        self.silence_frames = 0;
+        self.lstm_state.fill(0.0);
+        tracing::debug!("VAD full reset (LSTM state cleared)");
     }
 
     /// 获取当前状态

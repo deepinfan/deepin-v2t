@@ -118,6 +118,14 @@ impl VInputCoreState {
         self.is_recording = true;
         *self.stop_signal.lock().unwrap() = false;
 
+        // 新录音会话：完整重置管道（包括 Silero LSTM 清零）
+        // 防止上次会话结束后 LSTM 冻结在静音模式导致本次语音漏检
+        if let Ok(mut pipe) = self.pipeline.lock() {
+            if let Err(e) = pipe.on_recording_started() {
+                tracing::warn!("录音前管道重置失败: {}", e);
+            }
+        }
+
         // 创建音频环形缓冲区 (1 秒 @ 16kHz = 16000 samples)
         let ring_buffer_config = AudioRingBufferConfig {
             capacity: 16000,
