@@ -7,25 +7,20 @@ mod config;
 mod basic_settings_panel;
 mod about_panel;
 mod endpoint_panel;
-mod hotwords_editor;
-mod punctuation_panel;
 
 use config::VInputConfig;
 use basic_settings_panel::BasicSettingsPanel;
 use about_panel::AboutPanel;
 use endpoint_panel::EndpointPanel;
-use hotwords_editor::HotwordsEditor;
-use punctuation_panel::PunctuationPanel;
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt::init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([860.0, 580.0])
-            .with_min_inner_size([860.0, 580.0])
-            .with_max_inner_size([860.0, 580.0])
-            .with_resizable(false)
+            .with_inner_size([560.0, 540.0])
+            .with_min_inner_size([440.0, 360.0])
+            .with_resizable(true)
             .with_title("水滴语音输入法 - 设置"),
         ..Default::default()
     };
@@ -38,35 +33,11 @@ fn main() -> eframe::Result {
 }
 
 struct VInputApp {
-    active_tab: Tab,
     config: VInputConfig,
     basic_settings_panel: BasicSettingsPanel,
     about_panel: AboutPanel,
-    hotwords_editor: HotwordsEditor,
-    punctuation_panel: PunctuationPanel,
     endpoint_panel: EndpointPanel,
     config_modified: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Basic,
-    Hotwords,
-    Punctuation,
-    Endpoint,
-    About,
-}
-
-impl Tab {
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Basic => "基本设置",
-            Tab::Hotwords => "热词管理",
-            Tab::Punctuation => "标点控制",
-            Tab::Endpoint => "端点检测",
-            Tab::About => "关于",
-        }
-    }
 }
 
 impl VInputApp {
@@ -79,11 +50,8 @@ impl VInputApp {
         };
 
         Self {
-            active_tab: Tab::Basic,
             basic_settings_panel: BasicSettingsPanel::new(&config),
             about_panel: AboutPanel::new(&config),
-            hotwords_editor: HotwordsEditor::new(&config),
-            punctuation_panel: PunctuationPanel::new(&config),
             endpoint_panel: EndpointPanel::new(&config),
             config,
             config_modified: false,
@@ -115,8 +83,6 @@ impl VInputApp {
 
     fn save_config(&mut self) {
         self.basic_settings_panel.apply_to_config(&mut self.config);
-        self.hotwords_editor.apply_to_config(&mut self.config);
-        self.punctuation_panel.apply_to_config(&mut self.config);
         self.endpoint_panel.apply_to_config(&mut self.config);
         match self.config.save() {
             Ok(_) => { self.config_modified = false; tracing::info!("Config saved"); }
@@ -127,8 +93,6 @@ impl VInputApp {
     fn reset_config(&mut self) {
         self.config = VInputConfig::default();
         self.basic_settings_panel = BasicSettingsPanel::new(&self.config);
-        self.hotwords_editor = HotwordsEditor::new(&self.config);
-        self.punctuation_panel = PunctuationPanel::new(&self.config);
         self.endpoint_panel = EndpointPanel::new(&self.config);
         self.config_modified = true;
     }
@@ -161,54 +125,39 @@ impl eframe::App for VInputApp {
                 });
             });
 
-        // 左侧导航栏
-        egui::SidePanel::left("tab_panel")
-            .exact_width(130.0)
-            .show(ctx, |ui| {
-                ui.add_space(16.0);
-
-                let main_tabs = [Tab::Basic, Tab::Hotwords, Tab::Punctuation, Tab::Endpoint];
-                for tab in main_tabs {
-                    let is_active = self.active_tab == tab;
-                    let text = egui::RichText::new(tab.label()).size(14.0);
-                    let btn = egui::SelectableLabel::new(is_active, text);
-                    if ui.add_sized([ui.available_width(), 36.0], btn).clicked() {
-                        self.active_tab = tab;
-                    }
-                    ui.add_space(2.0);
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                let is_about = self.active_tab == Tab::About;
-                let about_text = egui::RichText::new(Tab::About.label()).size(14.0);
-                if ui.add_sized([ui.available_width(), 36.0], egui::SelectableLabel::new(is_about, about_text)).clicked() {
-                    self.active_tab = Tab::About;
-                }
-            });
-
-        // 中央内容区
+        // 内容区（单面板顺序显示）
         egui::CentralPanel::default().show(ctx, |ui| {
-            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                match self.active_tab {
-                    Tab::Basic => { if self.basic_settings_panel.ui(ui) { self.config_modified = true; } }
-                    Tab::Hotwords => { if self.hotwords_editor.ui(ui) { self.config_modified = true; } }
-                    Tab::Punctuation => { if self.punctuation_panel.ui(ui) { self.config_modified = true; } }
-                    Tab::Endpoint => { if self.endpoint_panel.ui(ui) { self.config_modified = true; } }
-                    Tab::About => { self.about_panel.ui(ui); }
-                }
-            }));
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                // 内边距
+                let margin = egui::Margin::symmetric(12, 10);
+                egui::Frame::new().inner_margin(margin).show(ui, |ui| {
+                    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        if self.basic_settings_panel.ui(ui) { self.config_modified = true; }
 
-            if let Err(e) = result {
-                ui.colored_label(egui::Color32::RED, "⚠ 面板渲染错误");
-                let msg = e.downcast_ref::<String>().cloned()
-                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "未知错误".to_string());
-                ui.label(&msg);
-                tracing::error!("Panel panic {:?}: {}", self.active_tab, msg);
-            }
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        if self.endpoint_panel.ui(ui) { self.config_modified = true; }
+
+                        ui.add_space(10.0);
+                        ui.separator();
+
+                        self.about_panel.ui(ui);
+                    }));
+
+                    if let Err(e) = result {
+                        ui.colored_label(egui::Color32::RED, "⚠ 面板渲染错误");
+                        let msg = e.downcast_ref::<String>().cloned()
+                            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "未知错误".to_string());
+                        ui.label(&msg);
+                        tracing::error!("Panel panic: {}", msg);
+                    }
+                });
+            });
         });
     }
 }

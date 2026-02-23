@@ -39,8 +39,7 @@ impl PunctuationPanel {
         ui.separator();
         ui.add_space(8.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // 风格预设
+        // 风格预设
             ui.label(egui::RichText::new("风格预设").size(13.0).strong());
             ui.add_space(6.0);
             ui.group(|ui| {
@@ -138,7 +137,6 @@ impl PunctuationPanel {
                         ui.end_row();
                     });
             });
-        });
 
         modified
     }

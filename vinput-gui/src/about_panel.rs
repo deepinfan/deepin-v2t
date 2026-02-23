@@ -97,58 +97,6 @@ impl AboutPanel {
 
             ui.add_space(20.0);
 
-            // 技术栈
-            ui.group(|ui| {
-                ui.set_min_width(400.0);
-                ui.label(egui::RichText::new("技术栈").strong());
-                ui.add_space(5.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("🦀");
-                    ui.label("Rust - 核心引擎");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("🎤");
-                    ui.label("sherpa-onnx - 语音识别");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("🔊");
-                    ui.label("PipeWire - 音频捕获");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("⌨️");
-                    ui.label("Fcitx5 - 输入法框架");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("🖥️");
-                    ui.label("egui - 图形界面");
-                });
-            });
-
-            ui.add_space(20.0);
-
-            // 致谢
-            ui.group(|ui| {
-                ui.set_min_width(400.0);
-                ui.label(egui::RichText::new("致谢").strong());
-                ui.add_space(5.0);
-
-                ui.label("感谢以下开源项目:");
-                ui.add_space(5.0);
-
-                ui.label("• sherpa-onnx - 语音识别引擎");
-                ui.label("• Fcitx5 - 输入法框架");
-                ui.label("• PipeWire - 音频服务");
-                ui.label("• egui - 即时模式 GUI");
-                ui.label("• Rust 社区");
-            });
-
-            ui.add_space(20.0);
-
             // 版权信息
             ui.label(egui::RichText::new("Copyright © 2026 水滴语音输入法贡献者").size(12.0));
             ui.label(egui::RichText::new("Licensed under MIT License").size(12.0));

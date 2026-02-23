@@ -75,7 +75,7 @@ fn main() -> VInputResult<()> {
     // 3. 初始化 VAD
     println!("3. 初始化 Silero VAD...");
     let vad_config = SileroVADConfig {
-        model_path: "../models/vad/silero_vad_v5.onnx".to_string(),
+        model_path: "../models/silero-vad/silero_vad.onnx".to_string(),
         sample_rate,
         threshold: 0.5,
         min_speech_duration_ms: 250,

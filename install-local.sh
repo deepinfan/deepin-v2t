@@ -51,6 +51,7 @@ install -d "${LIBDIR}" "${FCITX_DIR}" \
   /usr/share/fcitx5/addon \
   /usr/share/droplet-voice-input/models \
   /usr/share/droplet-voice-input/models/punct-ct-transformer \
+  /usr/share/droplet-voice-input/models/silero-vad \
   /usr/share/droplet-voice-input \
   /usr/bin
 
@@ -95,6 +96,13 @@ for file in model.int8.onnx tokens.json config.yaml; do
   fi
 done
 
+SILERO_MODEL_DIR="${ROOT_DIR}/models/silero-vad"
+if [ -f "${SILERO_MODEL_DIR}/silero_vad.onnx" ]; then
+  install -m 644 "${SILERO_MODEL_DIR}/silero_vad.onnx" /usr/share/droplet-voice-input/models/silero-vad/
+else
+  echo "警告: 缺少 Silero VAD 模型文件 ${SILERO_MODEL_DIR}/silero_vad.onnx"
+fi
+
 if command -v ldconfig >/dev/null 2>&1; then
   ldconfig
 fi
@@ -113,6 +121,6 @@ fi
 
 echo "安装完成。"
 echo "下一步:"
-echo "  1) 重启 fcitx5: fcitx5 -r"
+echo "  1) 重启  pkill fcitx5 && VINPUT_LOG=info fcitx5"
 echo "  2) 在 fcitx5 配置中添加『水滴语音输入法』"
 echo "  3) 运行设置界面: vinput-settings"

@@ -179,7 +179,7 @@ fn benchmark_ring_buffer(samples: &[f32]) -> VInputResult<()> {
 /// VAD 性能测试
 fn benchmark_vad(sample_rate: u32, samples: &[f32]) -> VInputResult<()> {
     let vad_config = SileroVADConfig {
-        model_path: "../models/vad/silero_vad_v5.onnx".to_string(),
+        model_path: "../models/silero-vad/silero_vad.onnx".to_string(),
         sample_rate,
         threshold: 0.5,
         min_speech_duration_ms: 250,
@@ -320,7 +320,7 @@ fn comprehensive_benchmark(sample_rate: u32, samples: &[f32]) -> VInputResult<()
     let (mut producer, mut consumer) = ring_buffer.split();
 
     let vad_config = SileroVADConfig {
-        model_path: "../models/vad/silero_vad_v5.onnx".to_string(),
+        model_path: "../models/silero-vad/silero_vad.onnx".to_string(),
         sample_rate,
         threshold: 0.5,
         min_speech_duration_ms: 250,

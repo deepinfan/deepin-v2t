@@ -32,7 +32,7 @@ fn main() -> VInputResult<()> {
 
     // 配置 VAD
     let config = SileroVADConfig {
-        model_path: "models/vad/silero_vad_v5.onnx".to_string(),
+        model_path: "models/silero-vad/silero_vad.onnx".to_string(),
         sample_rate: 16000,
         threshold: 0.5,
         min_speech_duration_ms: 250,

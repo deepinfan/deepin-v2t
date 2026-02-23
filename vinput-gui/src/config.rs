@@ -1,21 +1,24 @@
 //! V-Input 配置管理
+//!
+//! 此配置结构必须与核心的 TOML 格式完全匹配，以便安全地读写
+//! ~/.config/vinput/config.toml，不丢失核心依赖的任何字段。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// V-Input 配置
+/// V-Input 完整配置（与实际 TOML 文件结构一一对应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VInputConfig {
     /// 基本配置
     #[serde(default)]
     pub basic: BasicConfig,
-    /// 热词配置
+    /// 热词配置（UI 不暴露，仅做透传保留）
+    #[serde(default)]
     pub hotwords: HotwordsConfig,
-    /// 标点配置
-    pub punctuation: PunctuationConfig,
-    /// VAD 配置
+    /// VAD 配置（嵌套结构）
+    #[serde(default)]
     pub vad: VadConfig,
     /// ASR 配置
     pub asr: AsrConfig,
@@ -24,133 +27,211 @@ pub struct VInputConfig {
     pub endpoint: EndpointConfig,
 }
 
-/// 基本配置
+// ── 基本配置 ──────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BasicConfig {
-    /// 触发热键（如 "Ctrl+Alt+V"）
     pub hotkey: String,
 }
 
 impl Default for BasicConfig {
     fn default() -> Self {
+        Self { hotkey: "RCtrl".to_string() }
+    }
+}
+
+// ── 热词配置（透传，不在 UI 显示）────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotwordsConfig {
+    pub words: HashMap<String, f32>,
+    pub global_weight: f32,
+    pub max_words: usize,
+}
+
+impl Default for HotwordsConfig {
+    fn default() -> Self {
         Self {
-            hotkey: "RCtrl".to_string(),
+            words: HashMap::new(),
+            global_weight: 2.5,
+            max_words: 10000,
         }
     }
 }
 
-/// 热词配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HotwordsConfig {
-    /// 热词列表 (词汇 → 权重)
-    pub words: HashMap<String, f32>,
-    /// 全局权重
-    pub global_weight: f32,
-    /// 最大热词数
-    pub max_words: usize,
-}
+// ── VAD 配置（嵌套，与 [vad.*] TOML 节对应）─────────────────────────────────
 
-/// 标点配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PunctuationConfig {
-    /// 风格名称
-    pub style: String,
-    /// 停顿检测阈值
-    pub pause_ratio: f32,
-    /// 最小 token 数
-    pub min_tokens: usize,
-    /// 允许感叹号
-    pub allow_exclamation: bool,
-    /// 问号严格模式
-    pub question_strict: bool,
-}
-
-/// VAD 配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
-    /// 启动阈值
-    pub start_threshold: f32,
-    /// 结束阈值
-    pub end_threshold: f32,
-    /// 最小语音时长 (ms)
-    pub min_speech_duration: u64,
-    /// 最小静音时长 (ms)
-    pub min_silence_duration: u64,
+    #[serde(default)]
+    pub silero: VadSileroConfig,
+    #[serde(default)]
+    pub energy_gate: VadEnergyGateConfig,
+    #[serde(default)]
+    pub hysteresis: VadHysteresisConfig,
+    #[serde(default)]
+    pub pre_roll: VadPreRollConfig,
+    #[serde(default)]
+    pub transient_filter: VadTransientFilterConfig,
 }
 
-/// ASR 配置
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            silero: VadSileroConfig::default(),
+            energy_gate: VadEnergyGateConfig::default(),
+            hysteresis: VadHysteresisConfig::default(),
+            pre_roll: VadPreRollConfig::default(),
+            transient_filter: VadTransientFilterConfig::default(),
+        }
+    }
+}
+
+/// [vad.silero]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadSileroConfig {
+    pub model_path: String,
+    pub sample_rate: i32,
+    pub frame_size: usize,
+}
+
+impl Default for VadSileroConfig {
+    fn default() -> Self {
+        Self {
+            model_path: "/usr/share/droplet-voice-input/models/silero-vad/silero_vad.onnx".to_string(),
+            sample_rate: 16000,
+            frame_size: 512,
+        }
+    }
+}
+
+/// [vad.energy_gate]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadEnergyGateConfig {
+    pub enabled: bool,
+    pub noise_multiplier: f32,
+    pub baseline_alpha: f32,
+    pub initial_baseline: f32,
+}
+
+impl Default for VadEnergyGateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            noise_multiplier: 2.5,
+            baseline_alpha: 0.95,
+            initial_baseline: 0.001,
+        }
+    }
+}
+
+/// [vad.hysteresis] — UI 暴露此节的 4 个字段
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadHysteresisConfig {
+    pub start_threshold: f32,
+    pub end_threshold: f32,
+    pub min_speech_duration_ms: u64,
+    pub min_silence_duration_ms: u64,
+    pub max_candidate_gap_frames: u32,
+}
+
+impl Default for VadHysteresisConfig {
+    fn default() -> Self {
+        Self {
+            start_threshold: 0.25,
+            end_threshold: 0.08,
+            min_speech_duration_ms: 100,
+            min_silence_duration_ms: 500,
+            max_candidate_gap_frames: 3,
+        }
+    }
+}
+
+/// [vad.pre_roll]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadPreRollConfig {
+    pub enabled: bool,
+    pub duration_ms: u64,
+    pub capacity: usize,
+}
+
+impl Default for VadPreRollConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_ms: 750,
+            capacity: 12000,
+        }
+    }
+}
+
+/// [vad.transient_filter]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VadTransientFilterConfig {
+    pub enabled: bool,
+    pub max_duration_ms: u64,
+    pub rms_threshold: f32,
+}
+
+impl Default for VadTransientFilterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_duration_ms: 80,
+            rms_threshold: 0.05,
+        }
+    }
+}
+
+// ── ASR 配置 ──────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrConfig {
-    /// 模型目录
     pub model_dir: String,
-    /// 采样率
     pub sample_rate: i32,
-    /// 热词文件路径
-    pub hotwords_file: Option<String>,
-    /// 热词分数
+    /// 透传保留，UI 不暴露
+    #[serde(default = "default_hotwords_score")]
     pub hotwords_score: f32,
 }
 
-/// 端点检测配置
+fn default_hotwords_score() -> f32 { 1.5 }
+
+// ── 端点检测配置 ──────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
-    /// 最小语音长度（毫秒）
     pub min_speech_duration_ms: u64,
-    /// 最大语音长度（毫秒）
     pub max_speech_duration_ms: u64,
-    /// 语音结束后的静音等待时间（毫秒）
     pub trailing_silence_ms: u64,
-    /// 强制超时（毫秒）
     pub force_timeout_ms: u64,
-    /// 是否启用 VAD 辅助端点检测
     pub vad_assisted: bool,
-    /// VAD 检测到静音后的确认帧数
     pub vad_silence_confirm_frames: usize,
 }
-
-const RECOMMENDED_TRAILING_SILENCE_MS: u64 = 1000;
-const RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES: usize = 8;
-const RECOMMENDED_MIN_SILENCE_DURATION_MS: u64 = 700;
 
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
             min_speech_duration_ms: 300,
             max_speech_duration_ms: 30000,
-            trailing_silence_ms: RECOMMENDED_TRAILING_SILENCE_MS,
+            trailing_silence_ms: 1000,
             force_timeout_ms: 60000,
             vad_assisted: true,
-            vad_silence_confirm_frames: RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES,
+            vad_silence_confirm_frames: 8,
         }
     }
 }
+
+// ── VInputConfig impl ─────────────────────────────────────────────────────────
 
 impl Default for VInputConfig {
     fn default() -> Self {
         Self {
             basic: BasicConfig::default(),
-            hotwords: HotwordsConfig {
-                words: HashMap::new(),
-                global_weight: 2.5,
-                max_words: 10000,
-            },
-            punctuation: PunctuationConfig {
-                style: "Professional".to_string(),
-                pause_ratio: 3.5,
-                min_tokens: 5,
-                allow_exclamation: false,
-                question_strict: true,
-            },
-            vad: VadConfig {
-                start_threshold: 0.7,
-                end_threshold: 0.35,
-                min_speech_duration: 100,
-                min_silence_duration: RECOMMENDED_MIN_SILENCE_DURATION_MS,
-            },
+            hotwords: HotwordsConfig::default(),
+            vad: VadConfig::default(),
             asr: AsrConfig {
                 model_dir: "/usr/share/droplet-voice-input/models".to_string(),
                 sample_rate: 16000,
-                hotwords_file: None,
                 hotwords_score: 1.5,
             },
             endpoint: EndpointConfig::default(),
@@ -159,7 +240,6 @@ impl Default for VInputConfig {
 }
 
 impl VInputConfig {
-    /// 获取配置文件路径
     pub fn config_path() -> PathBuf {
         if let Some(config_dir) = dirs::config_dir() {
             config_dir.join("vinput").join("config.toml")
@@ -168,68 +248,40 @@ impl VInputConfig {
         }
     }
 
-    /// 加载配置
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let path = Self::config_path();
 
         if !path.exists() {
             tracing::info!("配置文件不存在，尝试从示例文件创建: {:?}", path);
-
-            // 尝试从系统示例文件复制
             let example_path = PathBuf::from("/usr/share/droplet-voice-input/config.toml.example");
             if example_path.exists() {
-                tracing::info!("从系统示例文件复制: {:?}", example_path);
-
-                // 确保目录存在
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-
-                // 复制示例文件
                 fs::copy(&example_path, &path)?;
                 tracing::info!("配置文件创建成功: {:?}", path);
             } else {
                 tracing::info!("示例文件不存在，使用默认配置并保存");
-
-                // 使用默认配置并保存
                 let default_config = Self::default();
                 default_config.save()?;
-                tracing::info!("默认配置已保存: {:?}", path);
-
                 return Ok(default_config);
             }
         }
 
-        // 读取配置文件
         let content = fs::read_to_string(&path)?;
         let config: VInputConfig = toml::from_str(&content)?;
-        let (normalized, updated) = config.normalize_legacy_config();
-
-        if updated {
-            tracing::info!("检测到旧版配置，已升级");
-            normalized.save()?;
-        }
-
         tracing::info!("配置加载成功: {:?}", path);
-        Ok(normalized)
+        Ok(config)
     }
 
-    /// 保存配置
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = Self::config_path();
-
-        // 确保目录存在
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-
         let content = toml::to_string_pretty(self)?;
         fs::write(path, content)?;
         Ok(())
-    }
-
-    fn normalize_legacy_config(self) -> (Self, bool) {
-        (self, false)
     }
 }
 
@@ -238,51 +290,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_config_creation() {
+    fn test_default_config() {
         let config = VInputConfig::default();
-
-        // 验证默认值
         assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
-        assert_eq!(config.asr.sample_rate, 16000);
-        assert_eq!(config.vad.start_threshold, 0.7);
-        assert_eq!(config.vad.min_silence_duration, RECOMMENDED_MIN_SILENCE_DURATION_MS);
-        assert_eq!(config.endpoint.trailing_silence_ms, RECOMMENDED_TRAILING_SILENCE_MS);
-        assert_eq!(config.endpoint.vad_silence_confirm_frames, RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES);
+        assert_eq!(config.vad.hysteresis.start_threshold, 0.25);
+        assert_eq!(config.vad.hysteresis.end_threshold, 0.08);
+        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
+        assert_eq!(config.endpoint.vad_silence_confirm_frames, 8);
     }
 
     #[test]
-    fn test_config_serialization() {
-        let config = VInputConfig::default();
-
-        // 序列化为 TOML
-        let toml_str = toml::to_string_pretty(&config).expect("Failed to serialize");
-
-        // 验证包含关键字段
-        assert!(toml_str.contains("model_dir"));
-        assert!(toml_str.contains("start_threshold"));
-        assert!(toml_str.contains("trailing_silence_ms"));
-    }
-
-    #[test]
-    fn test_config_deserialization() {
+    fn test_parse_actual_format() {
+        // 与实际 ~/.config/vinput/config.toml 格式一致
         let toml_str = r#"
+[basic]
+hotkey = "RCtrl"
+
 [hotwords]
-words = {}
 global_weight = 2.5
 max_words = 10000
 
-[punctuation]
-style = "Professional"
-pause_ratio = 3.5
-min_tokens = 5
-allow_exclamation = false
-question_strict = true
+[hotwords.words]
 
-[vad]
-start_threshold = 0.7
-end_threshold = 0.35
-min_speech_duration = 100
-min_silence_duration = 700
+[vad.silero]
+model_path = "/usr/share/droplet-voice-input/models/silero-vad/silero_vad.onnx"
+sample_rate = 16000
+frame_size = 512
+
+[vad.energy_gate]
+enabled = true
+noise_multiplier = 2.5
+baseline_alpha = 0.95
+initial_baseline = 0.001
+
+[vad.hysteresis]
+start_threshold = 0.25
+end_threshold = 0.08
+min_speech_duration_ms = 100
+min_silence_duration_ms = 500
+max_candidate_gap_frames = 3
+
+[vad.pre_roll]
+enabled = true
+duration_ms = 750
+capacity = 12000
+
+[vad.transient_filter]
+enabled = true
+max_duration_ms = 80
+rms_threshold = 0.05
 
 [asr]
 model_dir = "/usr/share/droplet-voice-input/models"
@@ -292,88 +348,35 @@ hotwords_score = 1.5
 [endpoint]
 min_speech_duration_ms = 300
 max_speech_duration_ms = 30000
-trailing_silence_ms = 1000
+trailing_silence_ms = 1500
 force_timeout_ms = 60000
 vad_assisted = true
-vad_silence_confirm_frames = 8
+vad_silence_confirm_frames = 5
 "#;
-
-        let config: VInputConfig = toml::from_str(toml_str).expect("Failed to deserialize");
-
-        // 验证反序列化的值
-        assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
-        assert_eq!(config.vad.start_threshold, 0.7);
-        assert_eq!(config.vad.min_silence_duration, 700);
-        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
+        let config: VInputConfig = toml::from_str(toml_str).expect("parse failed");
+        assert_eq!(config.vad.hysteresis.start_threshold, 0.25);
+        assert_eq!(config.vad.hysteresis.end_threshold, 0.08);
+        assert_eq!(config.vad.hysteresis.min_silence_duration_ms, 500);
+        assert_eq!(config.endpoint.trailing_silence_ms, 1500);
+        assert_eq!(config.asr.hotwords_score, 1.5);
+        assert_eq!(config.hotwords.global_weight, 2.5);
     }
 
     #[test]
-    fn test_config_roundtrip() {
+    fn test_roundtrip() {
         let original = VInputConfig::default();
-
-        // 序列化
-        let toml_str = toml::to_string_pretty(&original).expect("Failed to serialize");
-
-        // 反序列化
-        let deserialized: VInputConfig = toml::from_str(&toml_str).expect("Failed to deserialize");
-
-        // 验证关键字段一致
-        assert_eq!(original.asr.model_dir, deserialized.asr.model_dir);
-        assert_eq!(original.vad.start_threshold, deserialized.vad.start_threshold);
-        assert_eq!(original.endpoint.trailing_silence_ms, deserialized.endpoint.trailing_silence_ms);
+        let toml_str = toml::to_string_pretty(&original).expect("serialize failed");
+        let restored: VInputConfig = toml::from_str(&toml_str).expect("deserialize failed");
+        assert_eq!(original.vad.hysteresis.start_threshold, restored.vad.hysteresis.start_threshold);
+        assert_eq!(original.endpoint.trailing_silence_ms, restored.endpoint.trailing_silence_ms);
     }
 
     #[test]
-    fn test_vad_config_values() {
-        let config = VInputConfig::default();
-
-        // 验证 VAD 参数在合理范围内
-        assert!(config.vad.start_threshold >= 0.0 && config.vad.start_threshold <= 1.0);
-        assert!(config.vad.end_threshold >= 0.0 && config.vad.end_threshold <= 1.0);
-        assert!(config.vad.start_threshold > config.vad.end_threshold);
-        assert!(config.vad.min_silence_duration > 0);
-    }
-
-    #[test]
-    fn test_endpoint_config_values() {
-        let config = VInputConfig::default();
-
-        // 验证端点检测参数在合理范围内
-        assert!(config.endpoint.min_speech_duration_ms > 0);
-        assert!(config.endpoint.max_speech_duration_ms > config.endpoint.min_speech_duration_ms);
-        assert!(config.endpoint.trailing_silence_ms > 0);
-        assert!(config.endpoint.vad_silence_confirm_frames > 0);
-    }
-
-    #[test]
-    fn test_hotwords_config() {
-        let config = VInputConfig::default();
-
-        // 验证热词配置
-        assert!(config.hotwords.words.is_empty());
-        assert!(config.hotwords.global_weight > 0.0);
-        assert!(config.hotwords.max_words > 0);
-    }
-
-    #[test]
-    fn test_punctuation_config() {
-        let config = VInputConfig::default();
-
-        // 验证标点配置
-        assert_eq!(config.punctuation.style, "Professional");
-        assert!(config.punctuation.pause_ratio > 0.0);
-        assert!(config.punctuation.min_tokens > 0);
-    }
-
-    #[test]
-    fn test_normalize_legacy_config_no_change_for_partial_legacy_values() {
-        let base = VInputConfig::default();
-
-        let (normalized, updated) = base.normalize_legacy_config();
-
-        assert!(!updated);
-        assert_eq!(normalized.vad.min_silence_duration, RECOMMENDED_MIN_SILENCE_DURATION_MS);
-        assert_eq!(normalized.endpoint.trailing_silence_ms, RECOMMENDED_TRAILING_SILENCE_MS);
-        assert_eq!(normalized.endpoint.vad_silence_confirm_frames, RECOMMENDED_VAD_SILENCE_CONFIRM_FRAMES);
+    fn test_vad_thresholds_valid() {
+        let cfg = VInputConfig::default();
+        let h = &cfg.vad.hysteresis;
+        assert!(h.start_threshold > 0.0 && h.start_threshold <= 1.0);
+        assert!(h.end_threshold > 0.0 && h.end_threshold <= 1.0);
+        assert!(h.start_threshold > h.end_threshold);
     }
 }

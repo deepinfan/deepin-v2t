@@ -4,10 +4,8 @@ use eframe::egui;
 use crate::config::VInputConfig;
 
 pub struct BasicSettingsPanel {
-    itn_mode: String,
     audio_device: String,
     audio_devices: Vec<(String, String)>,
-    language: String,
     /// 当前已保存的热键字符串
     hotkey: String,
     /// 是否处于捕获模式
@@ -21,10 +19,8 @@ pub struct BasicSettingsPanel {
 impl BasicSettingsPanel {
     pub fn new(config: &VInputConfig) -> Self {
         Self {
-            itn_mode: "Auto".to_string(),
             audio_device: "default".to_string(),
             audio_devices: vec![("default".to_string(), "默认设备".to_string())],
-            language: "zh-CN".to_string(),
             hotkey: config.basic.hotkey.clone(),
             capturing: false,
             pending_modifier: None,
@@ -37,84 +33,72 @@ impl BasicSettingsPanel {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
+        // 捕获模式：全宽显示，替代正常布局
+        if self.capturing {
+            return self.ui_capture_mode(ui);
+        }
+
         let mut modified = false;
 
+        // 音频输入设备
+        ui.label(egui::RichText::new("音频输入设备").size(13.0).strong());
         ui.add_space(4.0);
-        ui.heading(egui::RichText::new("基本设置").size(18.0).strong());
-        ui.add_space(2.0);
-        ui.separator();
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                // 为刷新按钮留出固定宽度，其余全给下拉框
+                let btn_w = 48.0;
+                let combo_w = (ui.available_width() - btn_w - 8.0).max(80.0);
+                egui::ComboBox::from_id_salt("audio_device")
+                    .width(combo_w)
+                    .selected_text(egui::RichText::new(&self.audio_device).size(13.0))
+                    .show_ui(ui, |ui| {
+                        for (id, desc) in &self.audio_devices {
+                            if ui.selectable_value(
+                                &mut self.audio_device, id.clone(),
+                                egui::RichText::new(desc).size(13.0),
+                            ).clicked() {
+                                modified = true;
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                if ui.add_sized([btn_w - 4.0, 24.0],
+                    egui::Button::new(egui::RichText::new("刷新").size(13.0))).clicked() {
+                    self.refresh_audio_devices();
+                }
+            });
+        });
+
         ui.add_space(8.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // 文本规范化
-            ui.label(egui::RichText::new("文本规范化 (ITN)").size(13.0).strong());
-            ui.add_space(6.0);
-            ui.group(|ui| {
-                let prev = self.itn_mode.clone();
-                ui.radio_value(&mut self.itn_mode, "Auto".to_string(),
-                    egui::RichText::new("自动模式  —  启用全部规范化规则（数字、日期、货币等）").size(13.0));
-                ui.add_space(2.0);
-                ui.radio_value(&mut self.itn_mode, "NumbersOnly".to_string(),
-                    egui::RichText::new("仅数字模式  —  仅转换数字，保留其他原始文本").size(13.0));
-                ui.add_space(2.0);
-                ui.radio_value(&mut self.itn_mode, "Raw".to_string(),
-                    egui::RichText::new("原始模式  —  跳过全部规范化，保持识别原文").size(13.0));
-                if self.itn_mode != prev { modified = true; }
+        // 全局热键
+        ui.label(egui::RichText::new("全局热键").size(13.0).strong());
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(40, 44, 52))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 90, 110)))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(hotkey_display(&self.hotkey))
+                            .size(13.0).strong()
+                            .color(egui::Color32::from_rgb(80, 160, 240)));
+                    });
+                ui.add_space(8.0);
+                if ui.add_sized([52.0, 24.0],
+                    egui::Button::new(egui::RichText::new("修改").size(13.0))).clicked() {
+                    self.capturing = true;
+                    self.pending_modifier = None;
+                    self.prev_modifiers = egui::Modifiers::NONE;
+                }
             });
-
-            ui.add_space(12.0);
-
-            // 识别语言
-            ui.label(egui::RichText::new("识别语言").size(13.0).strong());
-            ui.add_space(6.0);
-            ui.group(|ui| {
-                let prev = self.language.clone();
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.language, "zh-CN".to_string(), egui::RichText::new("中文").size(13.0));
-                    ui.add_space(12.0);
-                    ui.radio_value(&mut self.language, "en-US".to_string(), egui::RichText::new("English").size(13.0));
-                    ui.add_space(12.0);
-                    ui.radio_value(&mut self.language, "zh-en".to_string(), egui::RichText::new("中英混合").size(13.0));
-                });
-                if self.language != prev { modified = true; }
-            });
-
-            ui.add_space(12.0);
-
-            // 音频输入设备
-            ui.label(egui::RichText::new("音频输入设备").size(13.0).strong());
-            ui.add_space(6.0);
-            ui.group(|ui| {
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("audio_device")
-                        .width(280.0)
-                        .selected_text(egui::RichText::new(&self.audio_device).size(13.0))
-                        .show_ui(ui, |ui| {
-                            for (id, desc) in &self.audio_devices {
-                                if ui.selectable_value(&mut self.audio_device, id.clone(),
-                                    egui::RichText::new(desc).size(13.0)).clicked() {
-                                    modified = true;
-                                }
-                            }
-                        });
-                    ui.add_space(8.0);
-                    if ui.button(egui::RichText::new("刷新").size(13.0)).clicked() {
-                        self.refresh_audio_devices();
-                    }
-                });
-            });
-
-            ui.add_space(12.0);
-
-            // 全局热键
-            ui.label(egui::RichText::new("全局热键").size(13.0).strong());
-            ui.add_space(6.0);
-
-            if self.capturing {
-                modified |= self.ui_capture_mode(ui);
-            } else {
-                self.ui_display_mode(ui, &mut modified);
-            }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("注意：Wayland 下全局热键支持有限").size(11.0)
+                .color(egui::Color32::from_rgb(160, 130, 60)));
         });
 
         modified
@@ -137,9 +121,8 @@ impl BasicSettingsPanel {
                     if *key == egui::Key::Escape {
                         return Some(KeyResult::Cancel);
                     }
-                    // 任意普通按键（带或不带修饰键均合法）
                     let name = egui_key_name(key);
-                    if name == "?" { continue; } // 忽略未知按键
+                    if name == "?" { continue; }
                     let hotkey = if modifiers.any() {
                         format!("{}{}", format_modifiers(modifiers), name)
                     } else {
@@ -156,21 +139,17 @@ impl BasicSettingsPanel {
 
         match key_result {
             Some(KeyResult::Cancel) => {
-                // Esc 取消，清空 pending
                 self.capturing = false;
                 self.pending_modifier = None;
             }
             Some(KeyResult::Captured(hotkey)) => {
-                // 普通按键（可能带修饰键）直接确认，忽略 pending
                 self.hotkey = hotkey;
                 self.capturing = false;
                 self.pending_modifier = None;
                 modified = true;
             }
             None => {
-                // 没有普通按键事件 —— 检测独立修饰键
                 if let Some(pending) = self.pending_modifier.take() {
-                    // 检查是否有修饰键被释放（按下后松开 = 确认为独立热键）
                     let released =
                         (self.prev_modifiers.ctrl  && !current_mods.ctrl)  ||
                         (self.prev_modifiers.alt   && !current_mods.alt)   ||
@@ -180,12 +159,9 @@ impl BasicSettingsPanel {
                         self.capturing = false;
                         modified = true;
                     } else {
-                        // 仍在按住，继续等待
                         self.pending_modifier = Some(pending);
                     }
                 } else {
-                    // 检测修饰键是否刚被按下（由 false → true）
-                    // 注意：此处无法区分左/右 Ctrl，统一记为 RCtrl（与默认热键一致）
                     if !self.prev_modifiers.ctrl && current_mods.ctrl {
                         self.pending_modifier = Some("RCtrl".to_string());
                     } else if !self.prev_modifiers.alt && current_mods.alt {
@@ -197,7 +173,6 @@ impl BasicSettingsPanel {
             }
         }
 
-        // 更新上一帧修饰键状态
         self.prev_modifiers = current_mods;
 
         // ③ 渲染捕获提示框
@@ -208,9 +183,9 @@ impl BasicSettingsPanel {
         };
 
         let frame_color = if self.pending_modifier.is_some() {
-            egui::Color32::from_rgb(30, 80, 50)   // 绿调：已有待确认按键
+            egui::Color32::from_rgb(30, 80, 50)
         } else {
-            egui::Color32::from_rgb(35, 55, 100)  // 蓝调：等待输入
+            egui::Color32::from_rgb(35, 55, 100)
         };
         let stroke_color = if self.pending_modifier.is_some() {
             egui::Color32::from_rgb(60, 180, 100)
@@ -238,41 +213,9 @@ impl BasicSettingsPanel {
                 });
             });
 
-        // 持续重绘，确保不遗漏事件
         ui.ctx().request_repaint();
 
         modified
-    }
-
-    /// 正常展示模式 UI
-    fn ui_display_mode(&mut self, ui: &mut egui::Ui, modified: &mut bool) {
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("当前热键：").size(13.0));
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(40, 44, 52))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 90, 110)))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(8, 3))
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(hotkey_display(&self.hotkey))
-                            .size(13.0).strong()
-                            .color(egui::Color32::from_rgb(80, 160, 240)));
-                    });
-                ui.add_space(12.0);
-                if ui.add_sized([60.0, 26.0],
-                    egui::Button::new(egui::RichText::new("修改").size(13.0))).clicked() {
-                    self.capturing = true;
-                    self.pending_modifier = None;
-                    self.prev_modifiers = egui::Modifiers::NONE;
-                    *modified = false; // 进入捕获模式本身不算修改
-                }
-            });
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("注意：Wayland 下全局热键支持有限").size(11.0)
-                .color(egui::Color32::from_rgb(160, 130, 60)));
-        });
-        let _ = modified; // suppress unused warning
     }
 
     fn refresh_audio_devices(&mut self) {
