@@ -1,349 +1,335 @@
-//! VAD Manager - 统一的 VAD 管理器
+//! VAD Manager - 简化版
 //!
-//! 集成所有 VAD 组件，提供统一的接口
+//! 能量门 + Silero VAD，输出 is_speech / speech_prob / pre_roll
 
 use crate::error::VInputResult;
-use crate::vad::{
-    config::VadConfig, energy_gate::EnergyGate, hysteresis::HysteresisController,
-    hysteresis::VadState, pre_roll_buffer::PreRollBuffer, transient_filter::TransientFilter,
-};
+use crate::vad::{config::VadConfig, energy_gate::EnergyGate};
 
 #[cfg(feature = "vad-onnx")]
 use crate::vad::silero::SileroVAD;
 
 /// VAD 处理结果
-#[derive(Debug, Clone)]
 pub struct VadResult {
-    /// 当前 VAD 状态
-    pub state: VadState,
-    /// 是否发生状态转换
-    pub state_changed: bool,
-    /// Silero VAD 输出的语音概率
+    pub is_speech: bool,
     pub speech_prob: f32,
-    /// Pre-roll 音频数据（仅在状态转换为 Speech 时有效）
-    pub pre_roll_audio: Option<Vec<f32>>,
+    /// 语音开始时的 pre-roll 音频（仅在 is_speech 首次为 true 时有值）
+    pub pre_roll: Option<Vec<f32>>,
 }
 
-/// VAD 管理器（集成所有组件）
+/// VAD 管理器
 pub struct VadManager {
     config: VadConfig,
     energy_gate: EnergyGate,
-    hysteresis: HysteresisController,
-    pre_roll_buffer: PreRollBuffer,
-    transient_filter: TransientFilter,
 
     #[cfg(feature = "vad-onnx")]
-    silero_vad: SileroVAD,
+    silero: SileroVAD,
 
-    /// 上一次的 VAD 状态（用于检测状态转换）
-    last_state: VadState,
+    /// pre-roll 环形缓冲（静音期间持续更新，语音开始时取出）
+    pre_roll: std::collections::VecDeque<Vec<f32>>,
+    /// pre-roll 最大帧数（512ms / 32ms = 16 帧）
+    pre_roll_max_frames: usize,
 
-    /// 诊断计数器（周期性打印 VAD 内部状态）
-    diag_frame_count: u64,
-    diag_energy_gate_pass: u64,
+    /// warmup 缓冲（静音帧，full_reset 后重放给 Silero 建立噪声基线）
+    #[cfg(feature = "vad-onnx")]
+    warmup: std::collections::VecDeque<Vec<f32>>,
+
+    /// 当前是否处于语音状态
+    is_speech: bool,
+    /// 连续语音帧数（用于起始确认）
+    speech_frames: u32,
+    /// 连续静音帧数（用于结束确认，由 pipeline 层决策）
+    #[allow(dead_code)]
+    silence_frames: u32,
+
+    /// 诊断
+    diag_frame: u64,
+    diag_gate_pass: u64,
     diag_max_prob: f32,
     diag_max_rms: f32,
 }
 
 impl VadManager {
-    /// 创建新的 VAD 管理器
     #[cfg(feature = "vad-onnx")]
     pub fn new(config: VadConfig) -> VInputResult<Self> {
-        // 创建 Silero VAD 配置
-        let silero_config = crate::vad::silero::SileroVADConfig {
+        use crate::vad::silero::{SileroVAD, SileroVADConfig};
+        let silero_cfg = SileroVADConfig {
             model_path: config.silero.model_path.clone(),
             sample_rate: config.silero.sample_rate,
             threshold: config.hysteresis.start_threshold,
             min_speech_duration_ms: config.hysteresis.min_speech_duration_ms as u32,
             min_silence_duration_ms: config.hysteresis.min_silence_duration_ms as u32,
         };
-
-        let silero_vad = SileroVAD::new(silero_config)?;
-
+        let silero = SileroVAD::new(silero_cfg)?;
+        let pre_roll_max_frames = 16; // 512ms @ 32ms/frame
         Ok(Self {
             energy_gate: EnergyGate::new(config.energy_gate.clone()),
-            hysteresis: HysteresisController::new(config.hysteresis.clone()),
-            pre_roll_buffer: PreRollBuffer::new(config.pre_roll.clone()),
-            transient_filter: TransientFilter::new(config.transient_filter.clone()),
-            silero_vad,
-            last_state: VadState::Silence,
-            diag_frame_count: 0,
-            diag_energy_gate_pass: 0,
+            silero,
+            pre_roll: std::collections::VecDeque::with_capacity(pre_roll_max_frames),
+            pre_roll_max_frames,
+            warmup: std::collections::VecDeque::with_capacity(16),
+            is_speech: false,
+            speech_frames: 0,
+            silence_frames: 0,
+            diag_frame: 0,
+            diag_gate_pass: 0,
             diag_max_prob: 0.0,
             diag_max_rms: 0.0,
             config,
         })
     }
 
-    /// 处理音频帧
-    ///
-    /// # 参数
-    /// - `samples`: 音频样本 (f32, [-1.0, 1.0])
-    ///   - 对于 16kHz: 512 samples (32ms)
-    ///   - 对于 8kHz: 256 samples (32ms)
-    ///
-    /// # 返回
-    /// - `VadResult`: VAD 处理结果
+    #[cfg(not(feature = "vad-onnx"))]
+    pub fn new(config: VadConfig) -> VInputResult<Self> {
+        Ok(Self {
+            energy_gate: EnergyGate::new(config.energy_gate.clone()),
+            pre_roll: std::collections::VecDeque::with_capacity(16),
+            pre_roll_max_frames: 16,
+            is_speech: false,
+            speech_frames: 0,
+            silence_frames: 0,
+            diag_frame: 0,
+            diag_gate_pass: 0,
+            diag_max_prob: 0.0,
+            diag_max_rms: 0.0,
+            config,
+        })
+    }
+
+    /// 处理一帧音频，返回 VAD 结果
     #[cfg(feature = "vad-onnx")]
     pub fn process(&mut self, samples: &[f32]) -> VInputResult<VadResult> {
-        // 1. Energy Gate - 第一层过滤
-        let passed_energy_gate = self.energy_gate.process(samples);
+        // 能量门
+        let passed = self.energy_gate.process(samples);
 
-        let (speech_prob, state, state_changed) = if passed_energy_gate {
-            // 2. Silero VAD - 核心检测
-            let prob = self.silero_vad.process_chunk(samples)?;
-
-            // 每帧记录 silero 原始概率（DEBUG 级别，info 模式下不显示）
-            tracing::debug!("VAD prob={:.3}", prob);
-
-            // 诊断统计
-            self.diag_energy_gate_pass += 1;
-            if prob > self.diag_max_prob {
-                self.diag_max_prob = prob;
-            }
-
-            // 3. Hysteresis Controller - 状态管理
-            let (new_state, changed) = self.hysteresis.process(prob);
-
-            (prob, new_state, changed)
+        let speech_prob = if passed {
+            self.diag_gate_pass += 1;
+            let p = self.silero.process_chunk(samples)?;
+            if p > self.diag_max_prob { self.diag_max_prob = p; }
+            p
         } else {
-            tracing::debug!("VAD EnergyGate blocked");
-            // Energy Gate 未通过，直接返回低概率
-            let (new_state, changed) = self.hysteresis.process(0.0);
-            (0.0, new_state, changed)
+            0.0
         };
 
-        // 更新 RMS 诊断统计
+        // 诊断
         let rms = {
-            let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
-            (sum_sq / samples.len() as f32).sqrt()
+            let s: f32 = samples.iter().map(|&x| x * x).sum();
+            (s / samples.len() as f32).sqrt()
         };
-        if rms > self.diag_max_rms {
-            self.diag_max_rms = rms;
-        }
-
-        self.diag_frame_count += 1;
-
-        // 每 50 帧（约 1.6 秒）打印一次诊断信息（INFO 级别，始终可见）
-        const DIAG_INTERVAL: u64 = 50;
-        if self.diag_frame_count % DIAG_INTERVAL == 0 {
-            let pass_ratio = self.diag_energy_gate_pass as f64 / DIAG_INTERVAL as f64;
+        if rms > self.diag_max_rms { self.diag_max_rms = rms; }
+        self.diag_frame += 1;
+        if self.diag_frame % 50 == 0 {
             tracing::info!(
-                "VAD 诊断 [帧 {}]: EnergyGate通过={:.0}%, 最高RMS={:.4}, 最高prob={:.3}, start_thresh={:.2}, 当前状态={:?}",
-                self.diag_frame_count,
-                pass_ratio * 100.0,
-                self.diag_max_rms,
-                self.diag_max_prob,
+                "VAD 诊断 [帧 {}]: EnergyGate通过={:.0}%, 最高RMS={:.4}, 最高prob={:.3}, thresh={:.2}, 状态={}",
+                self.diag_frame,
+                self.diag_gate_pass as f64 / 50.0 * 100.0,
+                self.diag_max_rms, self.diag_max_prob,
                 self.config.hysteresis.start_threshold,
-                state,
+                if self.is_speech { "Speech" } else { "Silence" },
             );
-            // 重置窗口统计
-            self.diag_energy_gate_pass = 0;
+            self.diag_gate_pass = 0;
             self.diag_max_prob = 0.0;
             self.diag_max_rms = 0.0;
         }
 
-        // 4. Transient Filter - 短爆发过滤
-        let is_speech = matches!(state, VadState::Speech | VadState::SpeechCandidate);
-        let _passed_transient_filter = self.transient_filter.process(samples, is_speech);
+        let threshold = self.config.hysteresis.start_threshold;
+        let is_above = speech_prob >= threshold;
 
-        // 5. Pre-roll Buffer 管理
-        let mut pre_roll_audio = None;
+        let mut pre_roll_out = None;
 
-        match state {
-            VadState::Silence => {
-                // 静音时，持续更新 Pre-roll Buffer
-                self.pre_roll_buffer.push(samples);
+        if !self.is_speech {
+            // 静音状态：更新 pre-roll 和 warmup 缓冲
+            if self.pre_roll.len() >= self.pre_roll_max_frames {
+                self.pre_roll.pop_front();
             }
-            VadState::SpeechCandidate => {
-                // 语音候选状态，继续缓冲
-                self.pre_roll_buffer.push(samples);
+            self.pre_roll.push_back(samples.to_vec());
+
+            if is_above {
+                self.speech_frames += 1;
+            } else {
+                self.speech_frames = 0;
+                // 只在静音帧更新 warmup
+                if self.warmup.len() >= 16 { self.warmup.pop_front(); }
+                self.warmup.push_back(samples.to_vec());
             }
-            VadState::Speech => {
-                // 刚进入语音状态
-                if state_changed {
-                    // 提取 Pre-roll 音频（语音开始前的缓冲）
-                    pre_roll_audio = Some(self.pre_roll_buffer.retrieve());
-                    tracing::debug!(
-                        "VAD: Speech started, pre-roll buffer: {} samples ({} ms)",
-                        pre_roll_audio.as_ref().unwrap().len(),
-                        self.pre_roll_buffer
-                            .buffered_duration_ms(self.config.silero.sample_rate)
-                    );
-                }
-                // 进入语音后不再更新 Pre-roll Buffer
+
+            // 连续 2 帧（64ms）以上高概率 → 确认语音开始
+            if self.speech_frames >= 2 {
+                self.is_speech = true;
+                self.silence_frames = 0;
+                // 取出 pre-roll
+                let audio: Vec<f32> = self.pre_roll.iter().flatten().copied().collect();
+                pre_roll_out = Some(audio);
+                self.pre_roll.clear();
+                tracing::info!("VAD: Silence → Speech (prob={:.3})", speech_prob);
             }
-            VadState::SilenceCandidate => {
-                // 静音候选状态，不更新缓冲
+        } else {
+            // 语音状态：由 pipeline 层通过帧计数决定端点
+            if !is_above {
+                self.silence_frames += 1;
+            } else {
+                self.silence_frames = 0;
             }
         }
 
-        self.last_state = state;
-
         Ok(VadResult {
-            state,
-            state_changed,
+            is_speech: self.is_speech,
             speech_prob,
-            pre_roll_audio,
+            pre_roll: pre_roll_out,
         })
     }
 
-    /// 强制设置 VAD 状态（用于 PushToTalk 模式）
-    pub fn force_state(&mut self, state: VadState) {
-        self.hysteresis.force_state(state);
-        self.last_state = state;
+    #[cfg(not(feature = "vad-onnx"))]
+    pub fn process(&mut self, samples: &[f32]) -> VInputResult<VadResult> {
+        let passed = self.energy_gate.process(samples);
+        let speech_prob = if passed { 0.8 } else { 0.2 };
+        let is_above = passed;
+        let mut pre_roll_out = None;
 
-        if matches!(state, VadState::Speech) {
-            // 进入语音状态时，清空 Pre-roll Buffer
-            self.pre_roll_buffer.clear();
+        if !self.is_speech {
+            if self.pre_roll.len() >= self.pre_roll_max_frames {
+                self.pre_roll.pop_front();
+            }
+            self.pre_roll.push_back(samples.to_vec());
+
+            if is_above { self.speech_frames += 1; } else { self.speech_frames = 0; }
+
+            if self.speech_frames >= 2 {
+                self.is_speech = true;
+                let audio: Vec<f32> = self.pre_roll.iter().flatten().copied().collect();
+                pre_roll_out = Some(audio);
+                self.pre_roll.clear();
+            }
         }
+
+        Ok(VadResult { is_speech: self.is_speech, speech_prob, pre_roll: pre_roll_out })
     }
 
-    /// 软重置：保留 Silero LSTM 状态（用于同一录音会话内句子间的重置）
-    #[cfg(feature = "vad-onnx")]
+    /// 软重置（保留 LSTM 状态）
     pub fn reset(&mut self) {
         self.energy_gate.reset();
-        self.hysteresis.reset();
-        self.pre_roll_buffer.reset();
-        self.transient_filter.reset();
-        self.silero_vad.reset();  // 软重置，LSTM 状态保留
-        self.last_state = VadState::Silence;
-        self.diag_frame_count = 0;
-        self.diag_energy_gate_pass = 0;
+        self.is_speech = false;
+        self.speech_frames = 0;
+        self.silence_frames = 0;
+        self.pre_roll.clear();
+        self.diag_frame = 0;
+        self.diag_gate_pass = 0;
         self.diag_max_prob = 0.0;
         self.diag_max_rms = 0.0;
-        tracing::debug!("VadManager soft reset");
+        #[cfg(feature = "vad-onnx")]
+        self.silero.reset();
     }
 
-    /// 完整重置：清零 Silero LSTM 状态（用于新录音会话开始）
-    ///
-    /// 录音停止后 LSTM 冻结在静音模式，需要完整重置确保新会话正常预热。
+    /// 完整重置（清零 LSTM + warmup 重放）
     #[cfg(feature = "vad-onnx")]
     pub fn full_reset(&mut self) {
         self.energy_gate.reset();
-        self.hysteresis.reset();
-        self.pre_roll_buffer.reset();
-        self.transient_filter.reset();
-        self.silero_vad.full_reset();  // 完整重置，LSTM 状态清零
-        self.last_state = VadState::Silence;
-        self.diag_frame_count = 0;
-        self.diag_energy_gate_pass = 0;
+        self.is_speech = false;
+        self.speech_frames = 0;
+        self.silence_frames = 0;
+        self.pre_roll.clear();
+        self.diag_frame = 0;
+        self.diag_gate_pass = 0;
         self.diag_max_prob = 0.0;
         self.diag_max_rms = 0.0;
-        tracing::debug!("VadManager full reset (LSTM cleared)");
-    }
 
-    /// 获取当前状态
-    pub fn state(&self) -> VadState {
-        self.hysteresis.state()
-    }
-
-    /// 获取配置
-    pub fn config(&self) -> &VadConfig {
-        &self.config
-    }
-
-    /// 获取 Pre-roll Buffer 引用（用于调试）
-    pub fn pre_roll_buffer(&self) -> &PreRollBuffer {
-        &self.pre_roll_buffer
-    }
-
-    /// 获取噪声基线（用于调试）
-    pub fn noise_baseline(&self) -> f32 {
-        self.energy_gate.noise_baseline()
-    }
-}
-
-// 无 ONNX Runtime 的简化实现（用于编译测试）
-#[cfg(not(feature = "vad-onnx"))]
-impl VadManager {
-    pub fn new(config: VadConfig) -> VInputResult<Self> {
-        Ok(Self {
-            energy_gate: EnergyGate::new(config.energy_gate.clone()),
-            hysteresis: HysteresisController::new(config.hysteresis.clone()),
-            pre_roll_buffer: PreRollBuffer::new(config.pre_roll.clone()),
-            transient_filter: TransientFilter::new(config.transient_filter.clone()),
-            last_state: VadState::Silence,
-            diag_frame_count: 0,
-            diag_energy_gate_pass: 0,
-            diag_max_prob: 0.0,
-            diag_max_rms: 0.0,
-            config,
-        })
-    }
-
-    pub fn process(&mut self, samples: &[f32]) -> VInputResult<VadResult> {
-        // 简化版本：仅使用 Energy Gate
-        let passed_energy_gate = self.energy_gate.process(samples);
-
-        // 基于 Energy Gate 的简单概率估计
-        let speech_prob = if passed_energy_gate { 0.8 } else { 0.2 };
-
-        let (state, state_changed) = self.hysteresis.process(speech_prob);
-
-        let is_speech = matches!(state, VadState::Speech | VadState::SpeechCandidate);
-        let _passed_transient_filter = self.transient_filter.process(samples, is_speech);
-
-        let mut pre_roll_audio = None;
-        if matches!(state, VadState::Silence | VadState::SpeechCandidate) {
-            self.pre_roll_buffer.push(samples);
-        } else if state_changed && matches!(state, VadState::Speech) {
-            pre_roll_audio = Some(self.pre_roll_buffer.retrieve());
+        self.silero.full_reset();
+        // 重放静音帧，建立噪声基线
+        let count = self.warmup.len();
+        for frame in &self.warmup {
+            let _ = self.silero.process_chunk(frame);
         }
-
-        self.last_state = state;
-
-        Ok(VadResult {
-            state,
-            state_changed,
-            speech_prob,
-            pre_roll_audio,
-        })
+        if count > 0 {
+            tracing::debug!("VadManager full_reset: warmup 重放 {} 帧", count);
+        }
     }
 
-    pub fn reset(&mut self) {
-        self.energy_gate.reset();
-        self.hysteresis.reset();
-        self.pre_roll_buffer.reset();
-        self.transient_filter.reset();
-        self.last_state = VadState::Silence;
-        self.diag_frame_count = 0;
-        self.diag_energy_gate_pass = 0;
-        self.diag_max_prob = 0.0;
-        self.diag_max_rms = 0.0;
-    }
+    pub fn is_speech(&self) -> bool { self.is_speech }
+    pub fn noise_baseline(&self) -> f32 { self.energy_gate.noise_baseline() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vad::config::{EnergyGateConfig, HysteresisConfig, SileroConfig, VadConfig, PreRollConfig, TransientFilterConfig};
 
-    #[test]
-    #[cfg(not(feature = "vad-onnx"))]
-    fn test_vad_manager_without_onnx() {
-        let config = VadConfig::push_to_talk_default();
-        let mut manager = VadManager::new(config).expect("Failed to create VadManager");
-
-        // 模拟语音
-        let speech: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin() * 0.1).collect();
-
-        let result = manager.process(&speech).expect("Failed to process");
-
-        assert!(result.speech_prob > 0.0);
-        assert_eq!(manager.state(), result.state);
+    fn test_config() -> VadConfig {
+        VadConfig {
+            energy_gate: EnergyGateConfig {
+                enabled: true,
+                noise_multiplier: 2.5,
+                baseline_alpha: 0.95,
+                initial_baseline: 0.001,
+            },
+            hysteresis: HysteresisConfig {
+                start_threshold: 0.6,
+                end_threshold: 0.35,
+                min_speech_duration_ms: 100,
+                min_silence_duration_ms: 500,
+                max_candidate_gap_frames: 2,
+            },
+            silero: SileroConfig {
+                model_path: "models/silero-vad/silero_vad.onnx".to_string(),
+                sample_rate: 16000,
+                frame_size: 512,
+            },
+            pre_roll: PreRollConfig { enabled: true, duration_ms: 250, capacity: 4000 },
+            transient_filter: TransientFilterConfig { enabled: true, max_duration_ms: 80, rms_threshold: 0.05 },
+        }
     }
 
+    fn silence() -> Vec<f32> { vec![0.0f32; 512] }
+    fn speech() -> Vec<f32> { (0..512).map(|i| (i as f32 * 0.05).sin() * 0.1).collect() }
+
+    #[cfg(not(feature = "vad-onnx"))]
     #[test]
-    fn test_vad_manager_force_state() {
-        let config = VadConfig::push_to_talk_default();
-        let mut manager = VadManager::new(config).expect("Failed to create VadManager");
+    fn test_silence_does_not_trigger_speech() {
+        let mut vad = VadManager::new(test_config()).unwrap();
+        for _ in 0..10 {
+            let r = vad.process(&silence()).unwrap();
+            assert!(!r.is_speech);
+            assert!(r.pre_roll.is_none());
+        }
+    }
 
-        assert_eq!(manager.state(), VadState::Silence);
+    #[cfg(not(feature = "vad-onnx"))]
+    #[test]
+    fn test_speech_triggers_after_4_frames() {
+        let mut vad = VadManager::new(test_config()).unwrap();
+        // 前 1 帧：is_speech 仍为 false
+        let r = vad.process(&speech()).unwrap();
+        assert!(!r.is_speech, "frame 0 should not be speech yet");
+        assert!(r.pre_roll.is_none());
+        // 第 2 帧：触发 Speech，输出 pre_roll
+        let r = vad.process(&speech()).unwrap();
+        assert!(r.is_speech);
+        assert!(r.pre_roll.is_some());
+    }
 
-        manager.force_state(VadState::Speech);
-        assert_eq!(manager.state(), VadState::Speech);
+    #[cfg(not(feature = "vad-onnx"))]
+    #[test]
+    fn test_pre_roll_contains_audio() {
+        let mut vad = VadManager::new(test_config()).unwrap();
+        for _ in 0..3 { vad.process(&silence()).unwrap(); }
+        vad.process(&speech()).unwrap(); // frame 1
+        let r = vad.process(&speech()).unwrap(); // frame 2 → triggers
+        let pr = r.pre_roll.unwrap();
+        assert!(!pr.is_empty(), "pre_roll should contain audio");
+    }
 
-        manager.force_state(VadState::Silence);
-        assert_eq!(manager.state(), VadState::Silence);
+    #[cfg(not(feature = "vad-onnx"))]
+    #[test]
+    fn test_reset_clears_state() {
+        let mut vad = VadManager::new(test_config()).unwrap();
+        // 触发语音
+        for _ in 0..2 { vad.process(&speech()).unwrap(); }
+        assert!(vad.is_speech());
+        // 重置后恢复静音状态
+        vad.reset();
+        assert!(!vad.is_speech());
+        // 重置后需要重新积累 2 帧才能触发
+        let r = vad.process(&speech()).unwrap();
+        assert!(!r.is_speech, "frame 0 after reset should not be speech");
+        let r = vad.process(&speech()).unwrap();
+        assert!(r.is_speech);
     }
 }

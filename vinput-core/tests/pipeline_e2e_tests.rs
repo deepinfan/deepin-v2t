@@ -15,10 +15,9 @@
 use std::path::{Path, PathBuf};
 use vinput_core::{
     asr::OnlineRecognizerConfig,
-    endpointing::EndpointDetectorConfig,
     itn::{ITNEngine, ITNMode},
     streaming::{StreamingConfig, StreamingPipeline},
-    vad::{VadConfig, VadState},
+    vad::VadConfig,
 };
 
 /// ASR 模型目录
@@ -94,19 +93,12 @@ fn create_pipeline() -> StreamingPipeline {
         ..Default::default()
     };
 
-    let endpoint_config = EndpointDetectorConfig {
-        min_speech_duration_ms: 300,
-        trailing_silence_ms: 600,
-        force_timeout_ms: 60_000,
-        vad_silence_confirm_frames: 5,
-        ..Default::default()
-    };
-
     let config = StreamingConfig {
         vad_config: VadConfig::push_to_talk_default(),
         asr_config,
-        punct_model_dir: "../models/punct-ct-transformer".to_string(),
-        endpoint_config,
+        punct_model_dir: format!("{}/punct-ct-transformer", MODELS_DIR),
+        trailing_silence_frames: 19, // ~600ms
+        min_speech_frames: 1,        // VAD 确认即启动 ASR
     };
 
     StreamingPipeline::new(config).expect("创建 StreamingPipeline 失败")
@@ -131,12 +123,13 @@ fn run_pipeline(wav_path: &Path) -> String {
     );
     let mut pipeline = create_pipeline();
 
-    // PushToTalk：强制进入语音状态
-    pipeline.force_vad_state(VadState::Speech);
+    // 预热 Silero LSTM：先喂 20 帧静音，建立噪声基线
+    let silence = vec![0.0f32; 512];
+    for _ in 0..20 {
+        pipeline.process(&silence).expect("warmup 失败");
+    }
 
-    // 喂入全部音频（不在 Completed 时提前退出）
-    // 原因：ASR 端点检测时序非确定性（ONNX 线程调度），提前退出会导致结果随机截断。
-    // get_final_result_with_punctuation() 内部会调用 input_finished() 确保最终解码完整。
+    // 喂入全部音频，让 VAD 自然检测语音
     for chunk in samples.chunks(512) {
         let mut frame = chunk.to_vec();
         frame.resize(512, 0.0);

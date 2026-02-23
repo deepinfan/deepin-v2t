@@ -22,6 +22,7 @@ pub struct VInputConfig {
     #[serde(default = "default_punct_model_dir")]
     pub punct_model_dir: String,
     /// 热词配置
+    #[serde(default)]
     pub hotwords: HotwordsConfig,
     /// 端点检测配置（自动断句上屏）
     #[serde(default)]

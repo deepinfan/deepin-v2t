@@ -69,7 +69,8 @@ impl VInputCoreState {
             vad_config: config.vad.clone(),
             asr_config: config.asr.clone(),
             punct_model_dir: config.punct_model_dir.clone(),
-            endpoint_config: config.endpoint.clone(),
+            trailing_silence_frames: (config.endpoint.trailing_silence_ms / 32) as u32,
+            min_speech_frames: (config.endpoint.min_speech_duration_ms / 32) as u32,
         };
         let pipeline = StreamingPipeline::new(streaming_config)?;
 
@@ -181,6 +182,13 @@ impl VInputCoreState {
 
         // 帧计数器，用于节流 Preedit 更新（降低 CPU 占用）
         let mut frame_counter: u64 = 0;
+        // 连续错误计数（用于检测持续性故障）
+        let mut consecutive_errors: u32 = 0;
+        const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+        // ring buffer 连续空读计数（用于检测 pw-record 死亡）
+        let mut consecutive_empty_reads: u32 = 0;
+        // 超过 ~3 秒无数据（300 × 10ms sleep）认为音频源已断开
+        const MAX_EMPTY_READS: u32 = 300;
 
         loop {
             // 检查停止信号
@@ -205,10 +213,27 @@ impl VInputCoreState {
             let samples_read = consumer.read(&mut frame_buffer);
 
             if samples_read == 0 {
+                consecutive_empty_reads += 1;
+                if consecutive_empty_reads >= MAX_EMPTY_READS {
+                    tracing::error!(
+                        "音频源已断开：连续 {:.1} 秒无数据（pw-record 可能已退出）",
+                        consecutive_empty_reads as f64 * 0.01
+                    );
+                    // 通知用户音频源断开
+                    if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                        let cmd = VInputCommand::error("音频源断开，请重新开始录音");
+                        callback(&cmd as *const VInputCommand);
+                        vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                    }
+                    break;
+                }
                 // 缓冲区为空，短暂休眠
                 thread::sleep(std::time::Duration::from_millis(10));
                 continue;
             }
+
+            // 有数据到达，重置空读计数
+            consecutive_empty_reads = 0;
 
             // 只处理完整的帧
             if samples_read < FRAME_SIZE {
@@ -222,6 +247,8 @@ impl VInputCoreState {
             if let Ok(mut pipe) = pipeline.lock() {
                 match pipe.process(&frame_buffer) {
                     Ok(result) => {
+                        // 处理成功，重置错误计数
+                        consecutive_errors = 0;
                         if !result.partial_result.is_empty() {
                             tracing::debug!("识别中: {}", result.partial_result);
                         }
@@ -312,8 +339,22 @@ impl VInputCoreState {
                         }
                     }
                     Err(e) => {
-                        tracing::error!("管道处理错误: {}", e);
-                        break;
+                        consecutive_errors += 1;
+                        tracing::error!(
+                            "管道处理错误 ({}/{}): {}",
+                            consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                        );
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            tracing::error!("连续 {} 次管道错误，退出音频处理线程", MAX_CONSECUTIVE_ERRORS);
+                            if let Some(callback) = *COMMAND_CALLBACK.lock().unwrap() {
+                                let cmd = VInputCommand::error("识别引擎持续故障，请重启录音");
+                                callback(&cmd as *const VInputCommand);
+                                vinput_command_free(&cmd as *const VInputCommand as *mut VInputCommand);
+                            }
+                            break;
+                        }
+                        // 瞬时错误：短暂等待后继续（ONNX 可能偶发推理失败）
+                        thread::sleep(std::time::Duration::from_millis(32));
                     }
                 }
             }
