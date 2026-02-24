@@ -200,23 +200,17 @@ fn default_hotwords_score() -> f32 { 1.5 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
-    pub min_speech_duration_ms: u64,
-    pub max_speech_duration_ms: u64,
+    /// 尾部静音时长（ms），达到后触发端点
     pub trailing_silence_ms: u64,
-    pub force_timeout_ms: u64,
-    pub vad_assisted: bool,
-    pub vad_silence_confirm_frames: usize,
+    /// 最小语音帧数（过短则丢弃）
+    pub min_speech_frames: u32,
 }
 
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
-            min_speech_duration_ms: 300,
-            max_speech_duration_ms: 30000,
-            trailing_silence_ms: 1000,
-            force_timeout_ms: 60000,
-            vad_assisted: true,
-            vad_silence_confirm_frames: 8,
+            trailing_silence_ms: 800,  // 800ms = 25 帧
+            min_speech_frames: 1,
         }
     }
 }
@@ -295,8 +289,8 @@ mod tests {
         assert_eq!(config.asr.model_dir, "/usr/share/droplet-voice-input/models");
         assert_eq!(config.vad.hysteresis.start_threshold, 0.25);
         assert_eq!(config.vad.hysteresis.end_threshold, 0.08);
-        assert_eq!(config.endpoint.trailing_silence_ms, 1000);
-        assert_eq!(config.endpoint.vad_silence_confirm_frames, 8);
+        assert_eq!(config.endpoint.trailing_silence_ms, 800);
+        assert_eq!(config.endpoint.min_speech_frames, 1);
     }
 
     #[test]
@@ -346,18 +340,14 @@ sample_rate = 16000
 hotwords_score = 1.5
 
 [endpoint]
-min_speech_duration_ms = 300
-max_speech_duration_ms = 30000
-trailing_silence_ms = 1500
-force_timeout_ms = 60000
-vad_assisted = true
-vad_silence_confirm_frames = 5
+trailing_silence_ms = 800
+min_speech_frames = 1
 "#;
         let config: VInputConfig = toml::from_str(toml_str).expect("parse failed");
         assert_eq!(config.vad.hysteresis.start_threshold, 0.25);
         assert_eq!(config.vad.hysteresis.end_threshold, 0.08);
         assert_eq!(config.vad.hysteresis.min_silence_duration_ms, 500);
-        assert_eq!(config.endpoint.trailing_silence_ms, 1500);
+        assert_eq!(config.endpoint.trailing_silence_ms, 800);
         assert_eq!(config.asr.hotwords_score, 1.5);
         assert_eq!(config.hotwords.global_weight, 2.5);
     }
