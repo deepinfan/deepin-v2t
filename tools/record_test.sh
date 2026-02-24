@@ -12,9 +12,8 @@ TESTDATA_DIR="${SCRIPT_DIR}/../vinput-core/tests/testdata"
 mkdir -p "${TESTDATA_DIR}"
 
 # 检查录音工具
-if ! command -v arecord &>/dev/null; then
-    echo "错误: 需要 arecord (alsa-utils)" >&2
-    echo "  sudo apt-get install alsa-utils" >&2
+if ! command -v pw-record &>/dev/null; then
+    echo "错误: 需要 pw-record (pipewire-utils)" >&2
     exit 1
 fi
 
@@ -57,52 +56,18 @@ read -r
 echo "🎙  正在录音... （按 Enter 停止）"
 echo ""
 
-# 录音到临时 RAW PCM 文件，再转换为 WAV
-# 原因：arecord 被 Ctrl+C 中断时 WAV 头可能不完整
-# 用 Enter 结束（向 arecord stdin 发送 EOF）更可靠
-RAW_FILE="${WAV_FILE%.wav}.raw"
-
-# 后台启动 arecord，按 Enter（stdin EOF）停止
-arecord \
-    --format=S16_LE \
+# 用 pw-record 直接录制 WAV（与 fcitx5-vinput 使用相同的音频设备）
+pw-record \
     --rate=16000 \
     --channels=1 \
-    --file-type=raw \
-    "${RAW_FILE}" &
-ARECORD_PID=$!
+    --format=s16 \
+    "${WAV_FILE}" &
+RECORD_PID=$!
 
 # 等待用户按 Enter
 read -r
-kill "${ARECORD_PID}" 2>/dev/null || true
-wait "${ARECORD_PID}" 2>/dev/null || true
-
-# 将 RAW PCM 转换为标准 WAV（写入正确的文件头）
-if command -v sox &>/dev/null; then
-    sox -r 16000 -c 1 -e signed -b 16 "${RAW_FILE}" "${WAV_FILE}"
-elif command -v ffmpeg &>/dev/null; then
-    ffmpeg -y -f s16le -ar 16000 -ac 1 -i "${RAW_FILE}" "${WAV_FILE}" -loglevel error
-else
-    # 无转换工具：手动写 WAV 头
-    python3 - "${RAW_FILE}" "${WAV_FILE}" <<'PYEOF'
-import sys, struct, os
-raw_file, wav_file = sys.argv[1], sys.argv[2]
-data = open(raw_file, 'rb').read()
-num_samples = len(data) // 2
-with open(wav_file, 'wb') as f:
-    # RIFF header
-    f.write(b'RIFF')
-    f.write(struct.pack('<I', 36 + len(data)))
-    f.write(b'WAVE')
-    # fmt chunk
-    f.write(b'fmt ')
-    f.write(struct.pack('<IHHIIHH', 16, 1, 1, 16000, 32000, 2, 16))
-    # data chunk
-    f.write(b'data')
-    f.write(struct.pack('<I', len(data)))
-    f.write(data)
-PYEOF
-fi
-rm -f "${RAW_FILE}"
+kill "${RECORD_PID}" 2>/dev/null || true
+wait "${RECORD_PID}" 2>/dev/null || true
 
 echo ""
 echo "✅ 录音完成"

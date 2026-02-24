@@ -175,8 +175,8 @@ impl VadConfig {
                 initial_baseline: 0.001,
             },
             hysteresis: HysteresisConfig {
-                start_threshold: 0.6,
-                end_threshold: 0.35,
+                start_threshold: 0.25,
+                end_threshold: 0.010,
                 min_speech_duration_ms: 100,
                 min_silence_duration_ms: 500,
                 max_candidate_gap_frames: 2,

@@ -97,7 +97,7 @@ fn create_pipeline() -> StreamingPipeline {
         vad_config: VadConfig::push_to_talk_default(),
         asr_config,
         punct_model_dir: format!("{}/punct-ct-transformer", MODELS_DIR),
-        trailing_silence_frames: 19, // ~600ms
+        trailing_silence_frames: 25, // ~800ms
         min_speech_frames: 1,        // VAD 确认即启动 ASR
     };
 
@@ -387,3 +387,4 @@ recording_test!(test_recording_017, "017");
 recording_test!(test_recording_018, "018");
 recording_test!(test_recording_019, "019");
 recording_test!(test_recording_020, "020");
+

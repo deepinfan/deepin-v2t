@@ -77,6 +77,16 @@ pub struct StreamingPipeline {
     /// 总帧计数（用于 duration_ms 估算）
     speech_start_frame: u64,
     total_frames: u64,
+    /// prob 滑动窗口（8帧=256ms，用于端点检测去抖）
+    prob_window: [f32; 8],
+    prob_window_pos: usize,
+    /// 说话期间 prob_max 峰值（用于动态端点阈值）
+    speech_prob_peak: f32,
+    /// RMS 滑动窗口（16帧=512ms，用于能量端点检测）
+    rms_window: [f32; 16],
+    rms_window_pos: usize,
+    /// 说话期间 rms_max 峰值（用于动态 RMS 阈值）
+    speech_rms_peak: f32,
 
     /// CT-Transformer 标点模型
     #[cfg(feature = "vad-onnx")]
@@ -113,6 +123,12 @@ impl StreamingPipeline {
             silence_frames: 0,
             speech_start_frame: 0,
             total_frames: 0,
+            prob_window: [0.0; 8],
+            prob_window_pos: 0,
+            speech_prob_peak: 0.0,
+            rms_window: [0.0; 16],
+            rms_window_pos: 0,
+            speech_rms_peak: 0.0,
             #[cfg(feature = "vad-onnx")]
             punct_model,
         })
@@ -124,44 +140,74 @@ impl StreamingPipeline {
 
         // 1. VAD 处理
         let vad_result = self.vad_manager.process(samples)?;
-        let is_speech = vad_result.is_speech;
+
+        // prob 滑动窗口最大值（8帧=256ms）
+        self.prob_window[self.prob_window_pos] = vad_result.speech_prob;
+        self.prob_window_pos = (self.prob_window_pos + 1) % 8;
+        let prob_max = self.prob_window.iter().cloned().fold(0.0f32, f32::max);
+
+        // RMS 滑动窗口最大值（16帧=512ms）
+        let rms = {
+            let s: f32 = samples.iter().map(|&x| x * x).sum();
+            (s / samples.len() as f32).sqrt()
+        };
+        self.rms_window[self.rms_window_pos] = rms;
+        self.rms_window_pos = (self.rms_window_pos + 1) % 16;
+        let rms_max = self.rms_window.iter().cloned().fold(0.0f32, f32::max);
+
+        let base_threshold = self.config.vad_config.hysteresis.end_threshold;
+        // 动态 prob 阈值：说话峰值的 5%
+        let end_threshold = (self.speech_prob_peak * 0.05).max(base_threshold);
+        // 动态 RMS 阈值：说话 RMS 峰值的 10%（适应不同麦克风音量）
+        let rms_threshold = (self.speech_rms_peak * 0.10).max(0.003);
+        // 端点判断：prob 窗口 OR RMS 窗口任一高于阈值就算语音
+        let frame_is_speech = prob_max >= end_threshold || rms_max >= rms_threshold;
 
         // 2. 状态机
         match self.pipeline_state {
             PipelineState::Idle => {
-                if is_speech {
-                    self.speech_frames += 1;
-                    self.silence_frames = 0;
-
-                    // 语音帧足够 → 启动 ASR
-                    if self.speech_frames >= self.config.min_speech_frames {
-                        self.start_asr(vad_result.pre_roll.as_deref())?;
-                    }
-                } else {
-                    self.speech_frames = 0;
-                    self.silence_frames += 1;
+                // VAD 确认语音（pre_roll 有值 = 刚从静音转为语音）→ 立即启动 ASR
+                if vad_result.is_speech && vad_result.pre_roll.is_some() {
+                    self.start_asr(vad_result.pre_roll.as_deref())?;
                 }
             }
 
             PipelineState::Recognizing => {
-                if is_speech {
+                // 所有帧都送入 ASR（静音也送，避免截断）
+                if let Some(stream) = &mut self.asr_stream {
+                    stream.accept_waveform(samples, self.config.vad_config.silero.sample_rate as i32);
+                }
+
+                // 更新说话期间峰值（用于动态端点阈值）
+                if prob_max > self.speech_prob_peak {
+                    self.speech_prob_peak = prob_max;
+                }
+                if rms_max > self.speech_rms_peak {
+                    self.speech_rms_peak = rms_max;
+                }
+
+                if frame_is_speech {
                     self.silence_frames = 0;
                     self.speech_frames += 1;
-                    // 送入 ASR
-                    if let Some(stream) = &mut self.asr_stream {
-                        stream.accept_waveform(samples, self.config.vad_config.silero.sample_rate as i32);
-                    }
                 } else {
                     self.silence_frames += 1;
-                    // 静音期间也继续送入 ASR（避免截断）
-                    if let Some(stream) = &mut self.asr_stream {
-                        stream.accept_waveform(samples, self.config.vad_config.silero.sample_rate as i32);
-                    }
-
                     // 达到尾部静音阈值 → 触发端点
                     if self.silence_frames >= self.config.trailing_silence_frames {
                         self.finalize_asr();
                     }
+                }
+                // 每帧记录 debug 日志（方便定位端点问题）
+                tracing::debug!(
+                    "EP prob={:.3} max={:.3}/{:.3}(dyn) rms={:.4} rms_max={:.4}/{:.4}(dyn) speech={} sil={}/{}",
+                    vad_result.speech_prob, prob_max, end_threshold, rms, rms_max, rms_threshold,
+                    self.speech_frames, self.silence_frames, self.config.trailing_silence_frames
+                );
+                if self.silence_frames > 0 && (self.silence_frames <= 5 || self.silence_frames % 5 == 0) {
+                    tracing::info!(
+                        "EP silence prob={:.3} max={:.3}/{:.3}(dyn) rms={:.4} rms_max={:.4}/{:.4}(dyn) sil={}/{}",
+                        vad_result.speech_prob, prob_max, end_threshold, rms, rms_max, rms_threshold,
+                        self.silence_frames, self.config.trailing_silence_frames
+                    );
                 }
 
                 // 实时解码
@@ -200,7 +246,7 @@ impl StreamingPipeline {
             unstable_text,
             should_add_comma: false,
             is_final: self.pipeline_state == PipelineState::Completed,
-            vad_state: if is_speech { VadState::Speech } else { VadState::Silence },
+            vad_state: if frame_is_speech { VadState::Speech } else { VadState::Silence },
             pipeline_state: self.pipeline_state,
             speech_prob: vad_result.speech_prob,
             duration_ms,
@@ -273,6 +319,12 @@ impl StreamingPipeline {
         self.speech_frames = 0;
         self.silence_frames = 0;
         self.speech_start_frame = 0;
+        self.prob_window = [0.0; 8];
+        self.prob_window_pos = 0;
+        self.speech_prob_peak = 0.0;
+        self.rms_window = [0.0; 16];
+        self.rms_window_pos = 0;
+        self.speech_rms_peak = 0.0;
     }
 
     /// 获取实时部分结果（Preedit 用）
