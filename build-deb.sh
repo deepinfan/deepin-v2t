@@ -16,7 +16,7 @@ echo ""
 
 # 包信息
 PACKAGE_NAME="droplet-voice-input"
-VERSION="0.1.0"
+VERSION="0.2.0"
 ARCH="amd64"
 MAINTAINER="Deepin Community <bbs.deepin.org>"
 DESCRIPTION="水滴语音输入法 - 离线中文语音输入法"
