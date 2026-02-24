@@ -203,13 +203,18 @@ pub struct EndpointConfig {
     /// 尾部静音时长（ms），达到后触发端点
     pub trailing_silence_ms: u64,
     /// 最小语音帧数（过短则丢弃）
+    #[serde(default = "default_min_speech_frames")]
     pub min_speech_frames: u32,
+}
+
+fn default_min_speech_frames() -> u32 {
+    1
 }
 
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
-            trailing_silence_ms: 800,  // 800ms = 25 帧
+            trailing_silence_ms: 800,
             min_speech_frames: 1,
         }
     }
