@@ -19,6 +19,12 @@ pub struct StreamingConfig {
     pub trailing_silence_frames: u32,
     /// 最大连续语音帧数（超过后强制断句），0 表示不限制
     pub max_speech_frames: u32,
+    /// 启用长停顿检测（检测到明显的长停顿时立即断句）
+    pub long_pause_detection_enabled: bool,
+    /// 长停顿阈值（毫秒），静音超过此时长视为明显停顿
+    pub long_pause_threshold_ms: u64,
+    /// 最小语音时长（毫秒），说话时长必须超过此值才允许断句
+    pub min_speech_before_endpoint_ms: u64,
 }
 
 impl Default for StreamingConfig {
@@ -29,6 +35,9 @@ impl Default for StreamingConfig {
             punct_model_dir: crate::config::resolve_punct_model_dir(),
             trailing_silence_frames: 47, // ~1500ms
             max_speech_frames: 625,      // ~20s (20000ms / 32ms)
+            long_pause_detection_enabled: false,
+            long_pause_threshold_ms: 1500,
+            min_speech_before_endpoint_ms: 1000,
         }
     }
 }
@@ -82,13 +91,15 @@ pub struct StreamingPipeline {
     /// prob 滑动窗口（8帧=256ms，用于端点检测去抖）
     prob_window: [f32; 8],
     prob_window_pos: usize,
-    /// 说话期间 prob_max 峰值（用于动态端点阈值）
-    speech_prob_peak: f32,
+    /// 语音概率 EMA（指数移动平均，用于动态参考基准）
+    speech_prob_ema: f32,
     /// RMS 滑动窗口（16帧=512ms，用于能量端点检测）
     rms_window: [f32; 16],
     rms_window_pos: usize,
-    /// 说话期间 rms_max 峰值（用于动态 RMS 阈值）
-    speech_rms_peak: f32,
+    /// RMS EMA（指数移动平均，用于动态参考基准）
+    speech_rms_ema: f32,
+    /// EMA 平滑系数（0.1 = 快速适应）
+    ema_alpha: f32,
 
     /// CT-Transformer 标点模型
     #[cfg(feature = "vad-onnx")]
@@ -128,10 +139,11 @@ impl StreamingPipeline {
             total_frames: 0,
             prob_window: [0.0; 8],
             prob_window_pos: 0,
-            speech_prob_peak: 0.0,
+            speech_prob_ema: 0.0,
             rms_window: [0.0; 16],
             rms_window_pos: 0,
-            speech_rms_peak: 0.0,
+            speech_rms_ema: 0.0,
+            ema_alpha: 0.1,
             #[cfg(feature = "vad-onnx")]
             punct_model,
         })
@@ -159,12 +171,18 @@ impl StreamingPipeline {
         let rms_max = self.rms_window.iter().cloned().fold(0.0f32, f32::max);
 
         let base_threshold = self.config.vad_config.hysteresis.end_threshold;
-        // 动态 prob 阈值：说话峰值的 5%
-        let end_threshold = (self.speech_prob_peak * 0.05).max(base_threshold);
-        // 动态 RMS 阈值：说话 RMS 峰值的 10%（适应不同麦克风音量）
-        let rms_threshold = (self.speech_rms_peak * 0.10).max(0.003);
-        // 端点判断：prob 窗口 OR RMS 窗口任一高于阈值就算语音
-        let frame_is_speech = prob_max >= end_threshold || rms_max >= rms_threshold;
+        // 动态 prob 阈值：EMA 的 5%
+        let end_threshold = (self.speech_prob_ema * 0.05).max(base_threshold);
+        // 动态 RMS 阈值：EMA 的 15%（平衡灵敏度和准确性）
+        let rms_threshold = (self.speech_rms_ema * 0.15).max(0.004);
+
+        // 端点判断：优先使用 RMS，prob 作为辅助
+        // 如果 prob 有效（> 0.01），则两者都要满足；否则只看 RMS
+        let frame_is_speech = if vad_result.speech_prob > 0.01 {
+            prob_max >= end_threshold && rms_max >= rms_threshold
+        } else {
+            rms_max >= rms_threshold
+        };
 
         // 2. 状态机
         match self.pipeline_state {
@@ -181,17 +199,16 @@ impl StreamingPipeline {
                     stream.accept_waveform(samples, self.config.vad_config.silero.sample_rate as i32);
                 }
 
-                // 更新说话期间峰值（用于动态端点阈值）
-                if prob_max > self.speech_prob_peak {
-                    self.speech_prob_peak = prob_max;
-                }
-                if rms_max > self.speech_rms_peak {
-                    self.speech_rms_peak = rms_max;
-                }
-
                 if frame_is_speech {
+                    // 更新 EMA（指数移动平均）
+                    self.speech_prob_ema = self.ema_alpha * vad_result.speech_prob
+                        + (1.0 - self.ema_alpha) * self.speech_prob_ema;
+                    self.speech_rms_ema = self.ema_alpha * rms
+                        + (1.0 - self.ema_alpha) * self.speech_rms_ema;
+
                     self.silence_frames = 0;
                     self.speech_frames += 1;
+
                     // 检查是否超过最大语音长度（连续说话强制断句）
                     if self.config.max_speech_frames > 0 && self.speech_frames >= self.config.max_speech_frames {
                         tracing::info!("达到最大语音长度 {}ms，强制断句", self.speech_frames * 32);
@@ -199,7 +216,41 @@ impl StreamingPipeline {
                     }
                 } else {
                     self.silence_frames += 1;
-                    // 达到尾部静音阈值 → 触发端点
+
+                    // 长停顿检测（如果启用）
+                    if self.config.long_pause_detection_enabled {
+                        let long_pause_frames = (self.config.long_pause_threshold_ms / 32) as u32;
+
+                        // 只在静音足够长时才计算（性能优化）
+                        if self.silence_frames >= long_pause_frames {
+                            let speech_duration_ms = (self.speech_frames * 32) as u64;
+
+                            // 门控 1：必须说话足够长
+                            if speech_duration_ms >= self.config.min_speech_before_endpoint_ms {
+                                // 门控 2：计算窗口平均值
+                                let current_rms_avg = self.rms_window.iter().sum::<f32>() / 16.0;
+                                let current_prob_avg = self.prob_window.iter().sum::<f32>() / 8.0;
+
+                                // 门控 3：必须足够低（深度静音）
+                                let is_deep_silence = self.speech_rms_ema > 0.0
+                                    && self.speech_prob_ema > 0.0
+                                    && current_rms_avg < self.speech_rms_ema * 0.3
+                                    && current_prob_avg < self.speech_prob_ema * 0.3;
+
+                                if is_deep_silence {
+                                    tracing::info!(
+                                        "长停顿检测触发：{}ms (rms={:.4}/{:.4}, prob={:.3}/{:.3})",
+                                        self.silence_frames * 32,
+                                        current_rms_avg, self.speech_rms_ema,
+                                        current_prob_avg, self.speech_prob_ema
+                                    );
+                                    self.finalize_asr();
+                                }
+                            }
+                        }
+                    }
+
+                    // 传统短停顿检测（兜底）
                     if self.silence_frames >= self.config.trailing_silence_frames {
                         self.finalize_asr();
                     }
@@ -310,6 +361,14 @@ impl StreamingPipeline {
         tracing::info!("Pipeline: 端点检测完成，静音帧={}", self.silence_frames);
     }
 
+    /// 强制完成当前 ASR 流（手动停止录音时使用）
+    pub fn force_finalize(&mut self) {
+        if self.pipeline_state == PipelineState::Recognizing {
+            tracing::info!("强制完成 ASR 流");
+            self.finalize_asr();
+        }
+    }
+
     /// 新录音会话开始（完整重置含 LSTM）
     pub fn on_recording_started(&mut self) -> VInputResult<()> {
         self.drop_asr_stream();
@@ -353,10 +412,10 @@ impl StreamingPipeline {
         self.speech_start_frame = 0;
         self.prob_window = [0.0; 8];
         self.prob_window_pos = 0;
-        self.speech_prob_peak = 0.0;
+        self.speech_prob_ema = 0.0;
         self.rms_window = [0.0; 16];
         self.rms_window_pos = 0;
-        self.speech_rms_peak = 0.0;
+        self.speech_rms_ema = 0.0;
     }
 
     /// 获取实时部分结果（Preedit 用）

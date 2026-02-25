@@ -163,6 +163,9 @@ rms_threshold = 0.05
 [endpoint]
 max_speech_duration_ms = 20000
 trailing_silence_ms = 800
+long_pause_detection_enabled = false
+long_pause_threshold_ms = 1500
+min_speech_before_endpoint_ms = 1000
 
 # 标点模型目录
 punct_model_dir = "/usr/share/droplet-voice-input/models/punct-ct-transformer"

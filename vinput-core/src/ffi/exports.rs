@@ -67,6 +67,9 @@ impl VInputCoreState {
             punct_model_dir: config.punct_model_dir.clone(),
             trailing_silence_frames: (config.endpoint.trailing_silence_ms / 32) as u32,
             max_speech_frames: (config.endpoint.max_speech_duration_ms / 32) as u32,
+            long_pause_detection_enabled: config.endpoint.long_pause_detection_enabled,
+            long_pause_threshold_ms: config.endpoint.long_pause_threshold_ms,
+            min_speech_before_endpoint_ms: config.endpoint.min_speech_before_endpoint_ms,
         };
         let pipeline = StreamingPipeline::new(streaming_config)?;
 
@@ -362,6 +365,14 @@ impl VInputCoreState {
         // 等待音频线程结束
         if let Some(handle) = self.audio_thread.take() {
             let _ = handle.join();
+        }
+
+        // 强制完成当前 ASR 流（如果还在识别中）
+        if let Ok(mut pipe) = self.pipeline.lock() {
+            if pipe.pipeline_state() == crate::streaming::PipelineState::Recognizing {
+                tracing::info!("手动停止时强制完成 ASR 流");
+                pipe.force_finalize();
+            }
         }
 
         // 获取识别结果（带智能标点）
@@ -760,6 +771,9 @@ pub extern "C" fn vinput_core_reload_config() -> VInputFFIResult {
                     punct_model_dir: config.punct_model_dir.clone(),
                     trailing_silence_frames: (config.endpoint.trailing_silence_ms / 32) as u32,
                     max_speech_frames: (config.endpoint.max_speech_duration_ms / 32) as u32,
+                    long_pause_detection_enabled: config.endpoint.long_pause_detection_enabled,
+                    long_pause_threshold_ms: config.endpoint.long_pause_threshold_ms,
+                    min_speech_before_endpoint_ms: config.endpoint.min_speech_before_endpoint_ms,
                 };
                 pipe.update_config(streaming_config);
                 tracing::info!("✅ Pipeline 配置已更新");

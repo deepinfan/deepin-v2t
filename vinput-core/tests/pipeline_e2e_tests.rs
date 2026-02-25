@@ -99,6 +99,9 @@ fn create_pipeline() -> StreamingPipeline {
         punct_model_dir: format!("{}/punct-ct-transformer", MODELS_DIR),
         trailing_silence_frames: 25, // ~800ms
         max_speech_frames: 0,        // 不限制最大语音长度
+        long_pause_detection_enabled: false,
+        long_pause_threshold_ms: 1500,
+        min_speech_before_endpoint_ms: 1000,
     };
 
     StreamingPipeline::new(config).expect("创建 StreamingPipeline 失败")

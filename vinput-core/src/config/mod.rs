@@ -17,16 +17,34 @@ pub struct EndpointConfig {
     /// 最大语音长度（毫秒），连续说话超过此时长自动断句
     #[serde(default = "default_max_speech_duration_ms")]
     pub max_speech_duration_ms: u64,
+
+    /// 启用长停顿检测（检测到明显的长停顿时立即断句）
+    #[serde(default = "default_long_pause_detection_enabled")]
+    pub long_pause_detection_enabled: bool,
+
+    /// 长停顿阈值（毫秒），静音超过此时长视为明显停顿
+    #[serde(default = "default_long_pause_threshold_ms")]
+    pub long_pause_threshold_ms: u64,
+
+    /// 最小语音时长（毫秒），说话时长必须超过此值才允许断句
+    #[serde(default = "default_min_speech_before_endpoint_ms")]
+    pub min_speech_before_endpoint_ms: u64,
 }
 
 fn default_trailing_silence_ms() -> u64 { 800 }
-fn default_max_speech_duration_ms() -> u64 { 20000 }
+fn default_max_speech_duration_ms() -> u64 { 60000 }
+fn default_long_pause_detection_enabled() -> bool { false }
+fn default_long_pause_threshold_ms() -> u64 { 1500 }
+fn default_min_speech_before_endpoint_ms() -> u64 { 1000 }
 
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
             trailing_silence_ms: 800,
-            max_speech_duration_ms: 20000,
+            max_speech_duration_ms: 60000,
+            long_pause_detection_enabled: false,
+            long_pause_threshold_ms: 1500,
+            min_speech_before_endpoint_ms: 1000,
         }
     }
 }

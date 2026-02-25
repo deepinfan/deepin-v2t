@@ -9,6 +9,9 @@ const LABEL_W: f32 = 110.0;
 pub struct EndpointPanel {
     trailing_silence_ms: u64,
     max_speech_duration_ms: u64,
+    long_pause_detection_enabled: bool,
+    long_pause_threshold_ms: u64,
+    min_speech_before_endpoint_ms: u64,
     vad_start_threshold: f32,
     vad_end_threshold: f32,
     vad_min_speech_duration: u64,
@@ -20,6 +23,9 @@ impl EndpointPanel {
         Self {
             trailing_silence_ms: config.endpoint.trailing_silence_ms,
             max_speech_duration_ms: config.endpoint.max_speech_duration_ms,
+            long_pause_detection_enabled: config.endpoint.long_pause_detection_enabled,
+            long_pause_threshold_ms: config.endpoint.long_pause_threshold_ms,
+            min_speech_before_endpoint_ms: config.endpoint.min_speech_before_endpoint_ms,
             vad_start_threshold: config.vad.hysteresis.start_threshold,
             vad_end_threshold: config.vad.hysteresis.end_threshold,
             vad_min_speech_duration: config.vad.hysteresis.min_speech_duration_ms,
@@ -30,6 +36,9 @@ impl EndpointPanel {
     pub fn apply_to_config(&self, config: &mut VInputConfig) {
         config.endpoint.trailing_silence_ms = self.trailing_silence_ms;
         config.endpoint.max_speech_duration_ms = self.max_speech_duration_ms;
+        config.endpoint.long_pause_detection_enabled = self.long_pause_detection_enabled;
+        config.endpoint.long_pause_threshold_ms = self.long_pause_threshold_ms;
+        config.endpoint.min_speech_before_endpoint_ms = self.min_speech_before_endpoint_ms;
         config.vad.hysteresis.start_threshold = self.vad_start_threshold;
         config.vad.hysteresis.end_threshold = self.vad_end_threshold;
         config.vad.hysteresis.min_speech_duration_ms = self.vad_min_speech_duration;
@@ -113,6 +122,61 @@ impl EndpointPanel {
                     ui.add_space(2.0);
                 }
             });
+        });
+
+        ui.add_space(8.0);
+
+        // ── 长停顿检测 ──────────────────────────────────────────────────────────
+        ui.label(egui::RichText::new("长停顿检测（实验性）").size(13.0).strong());
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new("检测到明显的长停顿时立即断句（无需等待完整静音延迟）")
+                .size(12.0).color(egui::Color32::GRAY));
+            ui.add_space(4.0);
+
+            // 启用开关
+            if ui.checkbox(&mut self.long_pause_detection_enabled, "启用长停顿检测").changed() {
+                modified = true;
+            }
+
+            if self.long_pause_detection_enabled {
+                ui.add_space(8.0);
+
+                // 长停顿阈值
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_W, 16.0],
+                        egui::Label::new(egui::RichText::new("长停顿阈值").size(13.0)));
+                    let mut v = self.long_pause_threshold_ms as f32;
+                    let w = ui.available_width();
+                    if ui.add_sized([w, 20.0],
+                        egui::Slider::new(&mut v, 800.0..=3000.0).suffix(" ms"),
+                    ).changed() {
+                        self.long_pause_threshold_ms = v as u64;
+                        modified = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                // 最小语音时长
+                ui.horizontal(|ui| {
+                    ui.add_sized([LABEL_W, 16.0],
+                        egui::Label::new(egui::RichText::new("最小语音时长").size(13.0)));
+                    let mut v = self.min_speech_before_endpoint_ms as f32;
+                    let w = ui.available_width();
+                    if ui.add_sized([w, 20.0],
+                        egui::Slider::new(&mut v, 500.0..=2000.0).suffix(" ms"),
+                    ).changed() {
+                        self.min_speech_before_endpoint_ms = v as u64;
+                        modified = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("💡 说话时长必须超过此值才允许长停顿断句")
+                    .size(11.0).color(egui::Color32::DARK_GRAY));
+            }
         });
 
         ui.add_space(8.0);
