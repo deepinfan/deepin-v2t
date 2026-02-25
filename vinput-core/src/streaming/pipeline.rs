@@ -101,6 +101,10 @@ pub struct StreamingPipeline {
     /// EMA 平滑系数（0.1 = 快速适应）
     ema_alpha: f32,
 
+    /// 音频缓冲区（用于超时断句后的连续语音，保留最近 16 帧 = 512ms）
+    audio_buffer: std::collections::VecDeque<Vec<f32>>,
+    audio_buffer_max_frames: usize,
+
     /// CT-Transformer 标点模型
     #[cfg(feature = "vad-onnx")]
     punct_model: Option<CtTransformerPunct>,
@@ -144,6 +148,8 @@ impl StreamingPipeline {
             rms_window_pos: 0,
             speech_rms_ema: 0.0,
             ema_alpha: 0.1,
+            audio_buffer: std::collections::VecDeque::with_capacity(16),
+            audio_buffer_max_frames: 16,
             #[cfg(feature = "vad-onnx")]
             punct_model,
         })
@@ -152,6 +158,12 @@ impl StreamingPipeline {
     /// 处理一帧音频（512 samples = 32ms @ 16kHz）
     pub fn process(&mut self, samples: &[f32]) -> VInputResult<StreamingResult> {
         self.total_frames += 1;
+
+        // 0. 更新音频缓冲区（用于超时断句后的连续语音）
+        if self.audio_buffer.len() >= self.audio_buffer_max_frames {
+            self.audio_buffer.pop_front();
+        }
+        self.audio_buffer.push_back(samples.to_vec());
 
         // 1. VAD 处理
         let vad_result = self.vad_manager.process(samples)?;
@@ -213,6 +225,8 @@ impl StreamingPipeline {
                     if self.config.max_speech_frames > 0 && self.speech_frames >= self.config.max_speech_frames {
                         tracing::info!("达到最大语音长度 {}ms，强制断句", self.speech_frames * 32);
                         self.finalize_asr();
+                        // 注意：不重置 VAD，因为用户可能还在连续说话
+                        // 音频缓冲区会提供足够的 pre-roll 给下一句
                     }
                 } else {
                     self.silence_frames += 1;
@@ -294,8 +308,22 @@ impl StreamingPipeline {
                     tracing::info!("Completed 状态检测到语音，立即启动新的 ASR 流");
                     // 重置状态（但不 full_reset VAD，保持 LSTM 连续性）
                     self.reset_state();
-                    // 启动新的 ASR 流（可能没有 pre_roll，但没关系）
-                    self.start_asr(vad_result.pre_roll.as_deref())?;
+
+                    // 关键修复：使用音频缓冲区作为 pre-roll
+                    // 如果 VAD 的 pre_roll 为空（超时断句场景），使用缓冲区中的音频
+                    let pre_roll_audio = if let Some(vad_pre_roll) = vad_result.pre_roll.as_deref() {
+                        // VAD 提供了 pre_roll（正常的 Silence → Speech 转换）
+                        vad_pre_roll.to_vec()
+                    } else {
+                        // VAD 没有 pre_roll（超时断句后的连续语音）
+                        // 使用音频缓冲区中的最近 512ms 音频
+                        let buffered: Vec<f32> = self.audio_buffer.iter().flatten().copied().collect();
+                        tracing::info!("使用音频缓冲区作为 pre-roll: {} 样本", buffered.len());
+                        buffered
+                    };
+
+                    // 启动新的 ASR 流，注入 pre-roll
+                    self.start_asr(Some(&pre_roll_audio))?;
                 }
             }
         }

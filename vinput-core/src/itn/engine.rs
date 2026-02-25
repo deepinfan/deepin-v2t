@@ -419,6 +419,13 @@ mod tests {
 
         assert_eq!(result.text, "1234");
         assert_eq!(result.changes.len(), 1);
+
+        // 测试小数转换
+        let result2 = engine.process("二点一");
+        assert_eq!(result2.text, "2.1");
+
+        let result3 = engine.process("零点三点四");
+        assert_eq!(result3.text, "0.3.4");
     }
 
     #[test]

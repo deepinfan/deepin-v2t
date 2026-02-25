@@ -194,6 +194,7 @@ impl ChineseNumberConverter {
                 '七' => '7',
                 '八' => '8',
                 '九' => '9',
+                '点' => '.', // 支持多个点（用于 IP 地址或版本号）
                 _ => {
                     return Err(VInputError::ItnConversion(format!(
                         "Invalid character in decimal part: {}",
@@ -306,6 +307,10 @@ mod tests {
             ChineseNumberConverter::convert("零点五").unwrap(),
             "0.5"
         );
+        // 新增测试用例
+        assert_eq!(ChineseNumberConverter::convert("二点一").unwrap(), "2.1");
+        // 测试多个点（IP 地址或版本号）
+        assert_eq!(ChineseNumberConverter::convert("零点三点四").unwrap(), "0.3.4");
     }
 
     #[test]

@@ -202,7 +202,7 @@ impl ChineseWordGuard {
         // 找到数字序列的结束位置
         let mut num_end = 0;
         for (i, &ch) in chars.iter().enumerate() {
-            if matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿') {
+            if matches!(ch, '零'|'一'|'二'|'三'|'四'|'五'|'六'|'七'|'八'|'九'|'十'|'百'|'千'|'万'|'亿'|'点') {
                 num_end = i + 1;
             } else {
                 break;
