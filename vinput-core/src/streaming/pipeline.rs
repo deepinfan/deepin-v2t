@@ -17,8 +17,8 @@ pub struct StreamingConfig {
     pub punct_model_dir: String,
     /// 尾部静音帧数阈值（每帧32ms），达到后触发端点
     pub trailing_silence_frames: u32,
-    /// 最小语音帧数（过短则丢弃）
-    pub min_speech_frames: u32,
+    /// 最大连续语音帧数（超过后强制断句），0 表示不限制
+    pub max_speech_frames: u32,
 }
 
 impl Default for StreamingConfig {
@@ -28,7 +28,7 @@ impl Default for StreamingConfig {
             asr_config: OnlineRecognizerConfig::default(),
             punct_model_dir: crate::config::resolve_punct_model_dir(),
             trailing_silence_frames: 47, // ~1500ms
-            min_speech_frames: 10,       // ~320ms
+            max_speech_frames: 625,      // ~20s (20000ms / 32ms)
         }
     }
 }
@@ -68,6 +68,8 @@ pub struct StreamingPipeline {
     vad_manager: VadManager,
     asr_recognizer: OnlineRecognizer,
     asr_stream: Option<OnlineStream<'static>>,
+    /// 已完成的 ASR 流（等待上层获取结果）
+    completed_stream: Option<OnlineStream<'static>>,
     pipeline_state: PipelineState,
 
     /// 语音帧计数（用于最小语音长度过滤）
@@ -118,6 +120,7 @@ impl StreamingPipeline {
             vad_manager,
             asr_recognizer,
             asr_stream: None,
+            completed_stream: None,
             pipeline_state: PipelineState::Idle,
             speech_frames: 0,
             silence_frames: 0,
@@ -189,6 +192,11 @@ impl StreamingPipeline {
                 if frame_is_speech {
                     self.silence_frames = 0;
                     self.speech_frames += 1;
+                    // 检查是否超过最大语音长度（连续说话强制断句）
+                    if self.config.max_speech_frames > 0 && self.speech_frames >= self.config.max_speech_frames {
+                        tracing::info!("达到最大语音长度 {}ms，强制断句", self.speech_frames * 32);
+                        self.finalize_asr();
+                    }
                 } else {
                     self.silence_frames += 1;
                     // 达到尾部静音阈值 → 触发端点
@@ -198,15 +206,23 @@ impl StreamingPipeline {
                 }
                 // 每帧记录 debug 日志（方便定位端点问题）
                 tracing::debug!(
-                    "EP prob={:.3} max={:.3}/{:.3}(dyn) rms={:.4} rms_max={:.4}/{:.4}(dyn) speech={} sil={}/{}",
+                    "EP prob={:.3} max={:.3}/{:.3}(dyn) rms={:.4} rms_max={:.4}/{:.4}(dyn) speech={}/{} sil={}/{}",
                     vad_result.speech_prob, prob_max, end_threshold, rms, rms_max, rms_threshold,
-                    self.speech_frames, self.silence_frames, self.config.trailing_silence_frames
+                    self.speech_frames, self.config.max_speech_frames, self.silence_frames, self.config.trailing_silence_frames
                 );
                 if self.silence_frames > 0 && (self.silence_frames <= 5 || self.silence_frames % 5 == 0) {
                     tracing::info!(
                         "EP silence prob={:.3} max={:.3}/{:.3}(dyn) rms={:.4} rms_max={:.4}/{:.4}(dyn) sil={}/{}",
                         vad_result.speech_prob, prob_max, end_threshold, rms, rms_max, rms_threshold,
                         self.silence_frames, self.config.trailing_silence_frames
+                    );
+                }
+                // 每 100 帧（约 3.2 秒）输出一次语音帧计数
+                if self.speech_frames > 0 && self.speech_frames % 100 == 0 {
+                    tracing::info!(
+                        "EP 语音持续中: speech={}/{} ({}s/{}s)",
+                        self.speech_frames, self.config.max_speech_frames,
+                        self.speech_frames * 32 / 1000, self.config.max_speech_frames * 32 / 1000
                     );
                 }
 
@@ -221,7 +237,15 @@ impl StreamingPipeline {
             }
 
             PipelineState::Completed => {
-                // 等待上层调用 get_final_result_with_punctuation() 后 reset()
+                // 继续运行 VAD，检测到语音立即启动新的 ASR 流
+                // completed_stream 保存了旧流的结果，不会丢失
+                if vad_result.is_speech {
+                    tracing::info!("Completed 状态检测到语音，立即启动新的 ASR 流");
+                    // 重置状态（但不 full_reset VAD，保持 LSTM 连续性）
+                    self.reset_state();
+                    // 启动新的 ASR 流（可能没有 pre_roll，但没关系）
+                    self.start_asr(vad_result.pre_roll.as_deref())?;
+                }
             }
         }
 
@@ -272,13 +296,15 @@ impl StreamingPipeline {
         Ok(())
     }
 
-    /// 触发端点：drain decode → Completed
+    /// 触发端点：drain decode → Completed，将流移到 completed_stream
     fn finalize_asr(&mut self) {
-        if let Some(stream) = &mut self.asr_stream {
+        if let Some(mut stream) = self.asr_stream.take() {
             stream.input_finished();
             while stream.is_ready(&self.asr_recognizer) {
                 stream.decode(&self.asr_recognizer);
             }
+            // 将完成的流保存到 completed_stream，等待上层获取结果
+            self.completed_stream = Some(stream);
         }
         self.pipeline_state = PipelineState::Completed;
         tracing::info!("Pipeline: 端点检测完成，静音帧={}", self.silence_frames);
@@ -294,6 +320,12 @@ impl StreamingPipeline {
         self.reset_state();
         tracing::info!("Pipeline: 新录音会话开始，完整重置（含 LSTM）");
         Ok(())
+    }
+
+    /// 更新配置（热重载）
+    pub fn update_config(&mut self, config: StreamingConfig) {
+        self.config = config;
+        tracing::info!("Pipeline 配置已更新");
     }
 
     /// 句间重置（full_reset LSTM）
@@ -336,17 +368,10 @@ impl StreamingPipeline {
         }
     }
 
-    /// 获取最终结果（带标点），内部自动 reset
+    /// 获取最终结果（带标点），从 completed_stream 获取
     pub fn get_final_result_with_punctuation(&mut self) -> String {
-        // 确保 drain 完成
-        if let Some(stream) = &mut self.asr_stream {
-            stream.input_finished();
-            while stream.is_ready(&self.asr_recognizer) {
-                stream.decode(&self.asr_recognizer);
-            }
-        }
-
-        let plain_text = if let Some(stream) = &self.asr_stream {
+        // 从 completed_stream 获取结果
+        let plain_text = if let Some(stream) = &self.completed_stream {
             let result = stream.get_detailed_result(&self.asr_recognizer);
             tracing::info!("ASR 识别结果: text='{}', tokens={}", result.text, result.tokens.len());
             for (i, t) in result.tokens.iter().enumerate() {
@@ -359,7 +384,7 @@ impl StreamingPipeline {
             tracing::info!("纯文本: '{}'", text);
             text
         } else {
-            tracing::warn!("ASR 流为空");
+            tracing::warn!("completed_stream 为空");
             String::new()
         };
 
@@ -380,7 +405,15 @@ impl StreamingPipeline {
             { plain_text }
         };
 
-        let _ = self.reset();
+        // 清理 completed_stream（释放内存）
+        if let Some(mut stream) = self.completed_stream.take() {
+            stream.reset(&self.asr_recognizer);
+        }
+
+        // 不改变 pipeline_state，让 process() 方法根据情况自动转换状态
+        // 如果在 Completed 状态下检测到新语音，会自动启动新流
+        // 如果没有新语音，会保持 Completed 状态直到下次语音到来
+
         result
     }
 

@@ -1,13 +1,12 @@
 //! FFI 导出函数 - 完整实现版本
 //!
 //! Rust cdylib FFI 接口，供 Fcitx5 C++ 插件调用
-//! 完整集成: StreamingPipeline + ITN + Punctuation + Hotwords
+//! 完整集成: StreamingPipeline + ITN + Punctuation
 
 use super::safety::{check_null, check_null_mut, ffi_safe_call};
 use super::types::{VInputCommand, VInputCommandCallback, VInputEvent, VInputEventType, VInputFFIResult};
 use crate::audio::{AudioRingBuffer, AudioRingBufferConfig, PipeWireStream, PipeWireStreamConfig};
 use crate::config::VInputConfig;
-use crate::hotwords::HotwordsEngine;
 use crate::itn::{ITNEngine, ITNMode};
 use crate::streaming::{StreamingConfig, StreamingPipeline};
 use crate::undo::RecognitionHistory;
@@ -29,9 +28,6 @@ struct VInputCoreState {
     pipeline: Arc<Mutex<StreamingPipeline>>,
     /// ITN 引擎（共享，供音频线程使用）
     itn_engine: Arc<Mutex<ITNEngine>>,
-    /// 热词引擎（仅用于初始化日志）
-    #[allow(dead_code)]
-    hotwords_engine: Option<HotwordsEngine>,
     /// 命令队列（共享，供音频线程使用）
     command_queue: Arc<Mutex<VecDeque<VInputCommand>>>,
     /// 识别历史（用于撤销/重试）
@@ -70,35 +66,16 @@ impl VInputCoreState {
             asr_config: config.asr.clone(),
             punct_model_dir: config.punct_model_dir.clone(),
             trailing_silence_frames: (config.endpoint.trailing_silence_ms / 32) as u32,
-            min_speech_frames: (config.endpoint.min_speech_duration_ms / 32) as u32,
+            max_speech_frames: (config.endpoint.max_speech_duration_ms / 32) as u32,
         };
         let pipeline = StreamingPipeline::new(streaming_config)?;
 
         // 创建后处理引擎
         let itn_engine = ITNEngine::new(ITNMode::Auto);
 
-        // 创建热词引擎（可选）
-        let hotwords_engine = if !config.hotwords.words.is_empty() {
-            let mut engine = HotwordsEngine::new();
-
-            // 添加所有配置的热词
-            for (word, weight) in &config.hotwords.words {
-                if let Err(e) = engine.add_hotword(word.clone(), *weight) {
-                    tracing::warn!("添加热词失败 '{}': {}", word, e);
-                }
-            }
-
-            tracing::info!("热词引擎初始化成功，加载 {} 个热词", engine.count());
-            Some(engine)
-        } else {
-            tracing::info!("未配置热词，跳过热词引擎初始化");
-            None
-        };
-
         Ok(Self {
             pipeline: Arc::new(Mutex::new(pipeline)),
             itn_engine: Arc::new(Mutex::new(itn_engine)),
-            hotwords_engine,
             command_queue: Arc::new(Mutex::new(VecDeque::new())),
             recognition_history: Arc::new(Mutex::new(RecognitionHistory::new(50))),
             is_recording: false,
@@ -751,5 +728,47 @@ pub extern "C" fn vinput_audio_device_list_free(list: *mut VInputAudioDeviceList
         }
 
         // list_box 自动释放
+    }
+}
+
+/// 重新加载配置文件
+///
+/// 用于在配置文件修改后热重载，无需重启 fcitx5
+#[no_mangle]
+pub extern "C" fn vinput_core_reload_config() -> VInputFFIResult {
+    match ffi_safe_call(|| {
+        tracing::info!("重新加载配置文件");
+
+        let config = match VInputConfig::load() {
+            Ok(cfg) => {
+                tracing::info!("✅ 配置重载成功");
+                cfg
+            }
+            Err(e) => {
+                tracing::error!("❌ 配置重载失败: {}", e);
+                return Err(VInputFFIResult::ConfigLoadFailed);
+            }
+        };
+
+        // 更新 pipeline 配置
+        let mut core_lock = VINPUT_CORE.lock().unwrap();
+        if let Some(core) = core_lock.as_mut() {
+            if let Ok(mut pipe) = core.pipeline.lock() {
+                let streaming_config = StreamingConfig {
+                    vad_config: config.vad.clone(),
+                    asr_config: config.asr.clone(),
+                    punct_model_dir: config.punct_model_dir.clone(),
+                    trailing_silence_frames: (config.endpoint.trailing_silence_ms / 32) as u32,
+                    max_speech_frames: (config.endpoint.max_speech_duration_ms / 32) as u32,
+                };
+                pipe.update_config(streaming_config);
+                tracing::info!("✅ Pipeline 配置已更新");
+            }
+        }
+
+        Ok(VInputFFIResult::Success)
+    }) {
+        Ok(result) => result,
+        Err(e) => e,
     }
 }

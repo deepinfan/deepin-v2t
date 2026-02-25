@@ -3,11 +3,33 @@
 //! 统一的配置管理，从 ~/.config/vinput/config.toml 加载
 
 use crate::asr::OnlineRecognizerConfig;
-use crate::endpointing::EndpointDetectorConfig;
-use crate::hotwords::HotwordsConfig;
 use crate::vad::VadConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// 端点检测配置（简化版，只保留实际使用的参数）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointConfig {
+    /// 语音结束后的静音等待时间（毫秒）
+    #[serde(default = "default_trailing_silence_ms")]
+    pub trailing_silence_ms: u64,
+
+    /// 最大语音长度（毫秒），连续说话超过此时长自动断句
+    #[serde(default = "default_max_speech_duration_ms")]
+    pub max_speech_duration_ms: u64,
+}
+
+fn default_trailing_silence_ms() -> u64 { 800 }
+fn default_max_speech_duration_ms() -> u64 { 20000 }
+
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self {
+            trailing_silence_ms: 800,
+            max_speech_duration_ms: 20000,
+        }
+    }
+}
 
 /// V-Input 完整配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,12 +43,9 @@ pub struct VInputConfig {
     /// 或 /usr/share/droplet-voice-input/models/punct-ct-transformer（系统安装）
     #[serde(default = "default_punct_model_dir")]
     pub punct_model_dir: String,
-    /// 热词配置
-    #[serde(default)]
-    pub hotwords: HotwordsConfig,
     /// 端点检测配置（自动断句上屏）
     #[serde(default)]
-    pub endpoint: EndpointDetectorConfig,
+    pub endpoint: EndpointConfig,
 }
 
 fn default_punct_model_dir() -> String {
@@ -68,8 +87,7 @@ impl Default for VInputConfig {
             vad: VadConfig::push_to_talk_default(),
             asr: asr_config,
             punct_model_dir: resolve_punct_model_dir(),
-            hotwords: HotwordsConfig::default(),
-            endpoint: EndpointDetectorConfig::default(),
+            endpoint: EndpointConfig::default(),
         }
     }
 }
@@ -89,10 +107,9 @@ impl VInputConfig {
 
         tracing::info!("📋 加载配置成功: {:?}", config_path);
         tracing::info!("📌 标点模型目录: {}", config.punct_model_dir);
-        tracing::info!("🎯 端点检测: trailing_silence={}ms, min_speech={}ms, vad_frames={}",
+        tracing::info!("🎯 端点检测: trailing_silence={}ms, max_speech={}ms",
             config.endpoint.trailing_silence_ms,
-            config.endpoint.min_speech_duration_ms,
-            config.endpoint.vad_silence_confirm_frames
+            config.endpoint.max_speech_duration_ms
         );
         Ok(config)
     }

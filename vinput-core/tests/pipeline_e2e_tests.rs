@@ -98,7 +98,7 @@ fn create_pipeline() -> StreamingPipeline {
         asr_config,
         punct_model_dir: format!("{}/punct-ct-transformer", MODELS_DIR),
         trailing_silence_frames: 25, // ~800ms
-        min_speech_frames: 1,        // VAD 确认即启动 ASR
+        max_speech_frames: 0,        // 不限制最大语音长度
     };
 
     StreamingPipeline::new(config).expect("创建 StreamingPipeline 失败")
@@ -136,7 +136,19 @@ fn run_pipeline(wav_path: &Path) -> String {
         pipeline.process(&frame).expect("处理音频帧失败");
     }
 
-    tracing::info!("📍 音频喂入完毕，获取最终结果");
+    // 喂入静音帧触发端点检测（最多 50 帧 = ~1600ms）
+    tracing::info!("📍 音频喂入完毕，喂入静音触发端点检测");
+    let silence = vec![0.0f32; 512];
+    for i in 0..50 {
+        let result = pipeline.process(&silence).expect("处理静音帧失败");
+        // 检查是否已完成识别
+        if result.is_final {
+            tracing::info!("📍 端点检测完成（第 {} 帧静音）", i + 1);
+            break;
+        }
+    }
+
+    tracing::info!("📍 获取最终结果");
 
     let punctuated = pipeline.get_final_result_with_punctuation();
 

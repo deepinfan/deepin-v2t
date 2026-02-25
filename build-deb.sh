@@ -23,7 +23,7 @@ DESCRIPTION="水滴语音输入法 - 离线中文语音输入法"
 HOMEPAGE="http://bbs.deepin.org"
 
 # 工作目录
-WORK_DIR="/tmp/${PACKAGE_NAME}_${VERSION}_${ARCH}"
+WORK_DIR="$(mktemp -d)/droplet-voice-input_${VERSION}_${ARCH}"
 DEB_DIR="${WORK_DIR}/DEBIAN"
 
 echo -e "${YELLOW}📦 包信息:${NC}"
@@ -35,6 +35,7 @@ echo ""
 # 清理旧的构建目录
 if [ -d "${WORK_DIR}" ]; then
     echo -e "${YELLOW}🧹 清理旧的构建目录...${NC}"
+    chmod -R u+w "${WORK_DIR}" 2>/dev/null || true
     rm -rf "${WORK_DIR}"
 fi
 
@@ -47,6 +48,9 @@ mkdir -p "${WORK_DIR}/usr/share/applications"
 mkdir -p "${WORK_DIR}/usr/share/fcitx5/addon"
 mkdir -p "${WORK_DIR}/usr/share/fcitx5/inputmethod"
 mkdir -p "${WORK_DIR}/usr/share/droplet-voice-input/models"
+mkdir -p "${WORK_DIR}/usr/share/icons/hicolor/48x48/apps"
+mkdir -p "${WORK_DIR}/usr/share/icons/hicolor/128x128/apps"
+mkdir -p "${WORK_DIR}/usr/share/icons/hicolor/256x256/apps"
 
 # 复制文件
 echo -e "${YELLOW}📋 复制文件...${NC}"
@@ -77,6 +81,14 @@ echo "  ✓ 设置程序 (6.7 MB)"
 cp target/release/vinput-settings "${WORK_DIR}/usr/bin/"
 chmod 755 "${WORK_DIR}/usr/bin/vinput-settings"
 
+echo "  ✓ 应用图标"
+cp assets/droplet-voice-input-48.png "${WORK_DIR}/usr/share/icons/hicolor/48x48/apps/droplet-voice-input.png"
+cp assets/droplet-voice-input-128.png "${WORK_DIR}/usr/share/icons/hicolor/128x128/apps/droplet-voice-input.png"
+cp assets/droplet-voice-input-256.png "${WORK_DIR}/usr/share/icons/hicolor/256x256/apps/droplet-voice-input.png"
+chmod 644 "${WORK_DIR}/usr/share/icons/hicolor/48x48/apps/droplet-voice-input.png"
+chmod 644 "${WORK_DIR}/usr/share/icons/hicolor/128x128/apps/droplet-voice-input.png"
+chmod 644 "${WORK_DIR}/usr/share/icons/hicolor/256x256/apps/droplet-voice-input.png"
+
 echo "  ✓ 桌面启动文件"
 cat > "${WORK_DIR}/usr/share/applications/droplet-voice-input.desktop" << 'EOF'
 [Desktop Entry]
@@ -85,7 +97,7 @@ Name[en]=Droplet Voice Input Settings
 Comment=配置水滴语音输入法
 Comment[en]=Configure Droplet Voice Input
 Exec=vinput-settings
-Icon=audio-input-microphone
+Icon=droplet-voice-input
 Terminal=false
 Type=Application
 Categories=Settings;Utility;
@@ -94,28 +106,66 @@ EOF
 chmod 644 "${WORK_DIR}/usr/share/applications/droplet-voice-input.desktop"
 
 echo "  ✓ AI 模型文件 (227 MB)"
+mkdir -p "${WORK_DIR}/usr/share/droplet-voice-input/models/silero-vad"
+mkdir -p "${WORK_DIR}/usr/share/droplet-voice-input/models/punct-ct-transformer"
 cp models/streaming/encoder.int8.onnx "${WORK_DIR}/usr/share/droplet-voice-input/models/"
 cp models/streaming/decoder.int8.onnx "${WORK_DIR}/usr/share/droplet-voice-input/models/"
 cp models/streaming/tokens.txt "${WORK_DIR}/usr/share/droplet-voice-input/models/"
-chmod 644 "${WORK_DIR}/usr/share/droplet-voice-input/models/"*
+cp models/silero-vad/silero_vad.onnx "${WORK_DIR}/usr/share/droplet-voice-input/models/silero-vad/"
+cp models/punct-ct-transformer/model.int8.onnx "${WORK_DIR}/usr/share/droplet-voice-input/models/punct-ct-transformer/"
+cp models/punct-ct-transformer/tokens.json "${WORK_DIR}/usr/share/droplet-voice-input/models/punct-ct-transformer/"
+cp models/punct-ct-transformer/config.yaml "${WORK_DIR}/usr/share/droplet-voice-input/models/punct-ct-transformer/"
 
 echo "  ✓ 示例配置文件"
 cat > "${WORK_DIR}/usr/share/droplet-voice-input/config.toml.example" << 'EOF'
+# V-Input 配置文件
+# 安装后会自动复制到 ~/.config/vinput/config.toml
+
+# ASR (语音识别) 配置
 [asr]
 model_dir = "/usr/share/droplet-voice-input/models"
 sample_rate = 16000
+feat_dim = 80
+decoding_method = "greedy_search"
 max_active_paths = 2
 
-[vad]
-threshold = 0.5
-min_speech_duration_ms = 250
+# VAD (语音活动检测) 配置
+[vad.silero]
+model_path = "/usr/share/droplet-voice-input/models/silero-vad/silero_vad.onnx"
+sample_rate = 16000
+frame_size = 512
+
+[vad.energy_gate]
+enabled = true
+noise_multiplier = 2.5
+baseline_alpha = 0.95
+initial_baseline = 0.001
+
+[vad.hysteresis]
+# 麦克风灵敏度（0.0-0.4，越小越灵敏）
+start_threshold = 0.1
+end_threshold = 0.35
+min_speech_duration_ms = 100
 min_silence_duration_ms = 500
+max_candidate_gap_frames = 2
 
-[punctuation]
-style = "Professional"
+[vad.pre_roll]
+enabled = true
+duration_ms = 250
+capacity = 4000
 
-[hotwords]
-# 用户可以在 ~/.config/vinput/config.toml 中添加自定义热词
+[vad.transient_filter]
+enabled = true
+max_duration_ms = 80
+rms_threshold = 0.05
+
+# 端点检测配置（自动断句上屏）
+[endpoint]
+max_speech_duration_ms = 20000
+trailing_silence_ms = 800
+
+# 标点模型目录
+punct_model_dir = "/usr/share/droplet-voice-input/models/punct-ct-transformer"
 EOF
 chmod 644 "${WORK_DIR}/usr/share/droplet-voice-input/config.toml.example"
 
@@ -172,17 +222,22 @@ case "$1" in
             fi
         fi
 
+        # 重启所有用户的 fcitx5
+        for user_id in $(loginctl list-users --no-legend | awk '{print $1}'); do
+            user_name=$(loginctl show-user "$user_id" -p Name --value)
+            sudo -u "$user_name" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$user_id/bus" fcitx5 -r 2>/dev/null || true &
+        done
+
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "  💧 水滴语音输入法安装完成！"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
-        echo "  使用方法："
-        echo "    1. 重启 Fcitx5: fcitx5 -r"
-        echo "    2. 在 Fcitx5 配置中添加「水滴语音输入法」"
-        echo "    3. 切换到水滴语音输入法"
-        echo "    4. 按空格开始录音，说话后松开空格"
-        echo "    5. 运行 vinput-settings 打开设置界面"
+        echo "  Fcitx5 已自动重启，现在可以："
+        echo "    1. 在 Fcitx5 配置中添加「水滴语音输入法」"
+        echo "    2. 切换到水滴语音输入法"
+        echo "    3. 按空格开始录音，说话后松开空格"
+        echo "    4. 运行 vinput-settings 打开设置界面"
         echo ""
         echo "  首发于深度操作系统论坛: http://bbs.deepin.org"
         echo ""

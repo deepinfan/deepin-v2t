@@ -8,7 +8,7 @@ const LABEL_W: f32 = 110.0;
 
 pub struct EndpointPanel {
     trailing_silence_ms: u64,
-    min_speech_frames: u32,
+    max_speech_duration_ms: u64,
     vad_start_threshold: f32,
     vad_end_threshold: f32,
     vad_min_speech_duration: u64,
@@ -19,7 +19,7 @@ impl EndpointPanel {
     pub fn new(config: &VInputConfig) -> Self {
         Self {
             trailing_silence_ms: config.endpoint.trailing_silence_ms,
-            min_speech_frames: config.endpoint.min_speech_frames,
+            max_speech_duration_ms: config.endpoint.max_speech_duration_ms,
             vad_start_threshold: config.vad.hysteresis.start_threshold,
             vad_end_threshold: config.vad.hysteresis.end_threshold,
             vad_min_speech_duration: config.vad.hysteresis.min_speech_duration_ms,
@@ -29,7 +29,7 @@ impl EndpointPanel {
 
     pub fn apply_to_config(&self, config: &mut VInputConfig) {
         config.endpoint.trailing_silence_ms = self.trailing_silence_ms;
-        config.endpoint.min_speech_frames = self.min_speech_frames;
+        config.endpoint.max_speech_duration_ms = self.max_speech_duration_ms;
         config.vad.hysteresis.start_threshold = self.vad_start_threshold;
         config.vad.hysteresis.end_threshold = self.vad_end_threshold;
         config.vad.hysteresis.min_speech_duration_ms = self.vad_min_speech_duration;
@@ -78,46 +78,57 @@ impl EndpointPanel {
 
         ui.add_space(8.0);
 
-        // ── 噪声过滤 ──────────────────────────────────────────────────────────
-        ui.label(egui::RichText::new("噪声过滤").size(13.0).strong());
+        // ── 连续说话自动断句 ──────────────────────────────────────────────────────────
+        ui.label(egui::RichText::new("连续说话自动断句").size(13.0).strong());
         ui.add_space(4.0);
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
+            ui.label(egui::RichText::new("连续说话超过此时长自动断句上屏（0 表示不限制）")
+                .size(12.0).color(egui::Color32::GRAY));
+            ui.add_space(4.0);
 
-            // 最小语音帧数
+            // 滑块占满宽度
+            let mut v = self.max_speech_duration_ms as f32;
+            let w = ui.available_width();
+            if ui.add_sized([w, 20.0],
+                egui::Slider::new(&mut v, 0.0..=60000.0).suffix(" ms"),
+            ).changed() {
+                self.max_speech_duration_ms = v as u64;
+                modified = true;
+            }
+
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.add_sized([LABEL_W, 16.0],
-                    egui::Label::new(egui::RichText::new("最小语音帧数").size(13.0)));
-                let mut v = self.min_speech_frames as f32;
-                let suffix = format!(" 帧 ≈{}ms", self.min_speech_frames * 32);
-                let w = ui.available_width();
-                if ui.add_sized([w, 20.0],
-                    egui::Slider::new(&mut v, 1.0..=10.0).suffix(suffix),
-                ).changed() {
-                    self.min_speech_frames = v as u32;
-                    modified = true;
+                for (label, val) in [
+                    ("不限制", 0u64), ("10秒", 10000),
+                    ("20秒 ⭐", 20000),  ("30秒", 30000),
+                ] {
+                    if ui.add_sized([90.0, 24.0], egui::SelectableLabel::new(
+                        self.max_speech_duration_ms == val,
+                        egui::RichText::new(label).size(12.0),
+                    )).clicked() {
+                        self.max_speech_duration_ms = val;
+                        modified = true;
+                    }
+                    ui.add_space(2.0);
                 }
             });
-
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new("最小语音长度：短于此时长的音频视为噪声忽略")
-                .size(11.0).color(egui::Color32::GRAY));
         });
 
         ui.add_space(8.0);
 
-        // ── VAD 参数 ──────────────────────────────────────────────────────────
-        ui.label(egui::RichText::new("VAD 参数").size(13.0).strong());
+        // ── 录音参数 ──────────────────────────────────────────────────────────
+        ui.label(egui::RichText::new("录音参数").size(13.0).strong());
         ui.add_space(4.0);
         ui.group(|ui| {
             ui.set_min_width(ui.available_width());
 
             ui.horizontal(|ui| {
                 ui.add_sized([LABEL_W, 16.0],
-                    egui::Label::new(egui::RichText::new("语音启动阈值").size(13.0)));
+                    egui::Label::new(egui::RichText::new("麦克风灵敏度").size(13.0)));
                 let w = ui.available_width();
                 if ui.add_sized([w, 20.0],
-                    egui::Slider::new(&mut self.vad_start_threshold, 0.0..=1.0).fixed_decimals(2),
+                    egui::Slider::new(&mut self.vad_start_threshold, 0.0..=0.4).fixed_decimals(2),
                 ).changed() { modified = true; }
             });
 

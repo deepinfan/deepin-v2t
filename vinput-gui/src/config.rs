@@ -202,20 +202,20 @@ fn default_hotwords_score() -> f32 { 1.5 }
 pub struct EndpointConfig {
     /// 尾部静音时长（ms），达到后触发端点
     pub trailing_silence_ms: u64,
-    /// 最小语音帧数（过短则丢弃）
-    #[serde(default = "default_min_speech_frames")]
-    pub min_speech_frames: u32,
+    /// 最大语音长度（ms），连续说话超过此时长自动断句
+    #[serde(default = "default_max_speech_duration_ms")]
+    pub max_speech_duration_ms: u64,
 }
 
-fn default_min_speech_frames() -> u32 {
-    1
+fn default_max_speech_duration_ms() -> u64 {
+    20000
 }
 
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
             trailing_silence_ms: 800,
-            min_speech_frames: 1,
+            max_speech_duration_ms: 20000,
         }
     }
 }
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(config.vad.hysteresis.start_threshold, 0.25);
         assert_eq!(config.vad.hysteresis.end_threshold, 0.08);
         assert_eq!(config.endpoint.trailing_silence_ms, 800);
-        assert_eq!(config.endpoint.min_speech_frames, 1);
+        assert_eq!(config.endpoint.max_speech_duration_ms, 20000);
     }
 
     #[test]
@@ -346,7 +346,7 @@ hotwords_score = 1.5
 
 [endpoint]
 trailing_silence_ms = 800
-min_speech_frames = 1
+max_speech_duration_ms = 20000
 "#;
         let config: VInputConfig = toml::from_str(toml_str).expect("parse failed");
         assert_eq!(config.vad.hysteresis.start_threshold, 0.25);

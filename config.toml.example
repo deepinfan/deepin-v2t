@@ -1,59 +1,74 @@
-# V-Input 热词配置示例
+# V-Input 配置文件示例
+# 配置文件路径: ~/.config/vinput/config.toml
 
-# 热词配置
-[hotwords]
-global_weight = 2.5
-max_words = 10000
-
-# 热词列表（词汇 → 权重）
-[hotwords.words]
-# 技术术语
-"深度学习" = 3.0
-"人工智能" = 2.5
-"神经网络" = 2.5
-"机器学习" = 2.0
-"自然语言处理" = 2.0
-
-# 编程语言
-"Python" = 2.0
-"JavaScript" = 2.0
-"TypeScript" = 2.0
-"Rust" = 2.0
-
-# 框架和工具
-"PyTorch" = 2.5
-"TensorFlow" = 2.5
-"Kubernetes" = 2.0
-"Docker" = 2.0
-
-# 标点配置
-[punctuation]
-style = "Professional"
-pause_ratio = 1.8          # 停顿检测阈值（降低以提高逗号检测灵敏度，原 2.0）
-min_tokens = 5             # 开始检测逗号的最小 token 数（原 3）
-allow_exclamation = false  # 是否允许感叹号
-question_strict = true     # 问号严格模式
-
-# VAD 配置
-[vad]
-mode = "PushToTalk"
-start_threshold = 0.7
-end_threshold = 0.35
-min_speech_duration = 100
-min_silence_duration = 700
-
-# ASR 配置
+# ============================================================
+# ASR (语音识别) 配置
+# ============================================================
 [asr]
+# 模型目录路径（开发环境）
 model_dir = "/home/deepin/deepin-v2t/models/streaming"
+# 采样率 (Hz)
 sample_rate = 16000
-hotwords_score = 1.5
+# 特征维度
+feat_dim = 80
+# 解码方法 ("greedy_search" 或 "modified_beam_search")
+decoding_method = "greedy_search"
+# 最大活跃路径数（越大越准确但越慢）
 max_active_paths = 2
 
-# 端点检测配置
+# ============================================================
+# VAD (语音活动检测) 配置
+# ============================================================
+
+# Silero VAD 模型配置
+[vad.silero]
+model_path = "models/silero-vad/silero_vad.onnx"
+sample_rate = 16000
+frame_size = 512
+
+# 能量门限配置（噪声过滤）
+[vad.energy_gate]
+enabled = true
+noise_multiplier = 2.5
+baseline_alpha = 0.95
+initial_baseline = 0.001
+
+# 迟滞控制器配置（语音/静音状态切换）
+[vad.hysteresis]
+# 麦克风灵敏度（0.0-0.4，越小越灵敏）
+start_threshold = 0.1
+# 静音结束阈值
+end_threshold = 0.35
+# 最小语音时长 (ms)
+min_speech_duration_ms = 100
+# 最小静音时长 (ms)
+min_silence_duration_ms = 500
+# 最大候选间隙帧数
+max_candidate_gap_frames = 2
+
+# Pre-roll 缓冲配置
+[vad.pre_roll]
+enabled = true
+duration_ms = 250
+capacity = 4000
+
+# 短爆发过滤器配置
+[vad.transient_filter]
+enabled = true
+max_duration_ms = 80
+rms_threshold = 0.05
+
+# ============================================================
+# 端点检测配置（自动断句上屏）
+# ============================================================
 [endpoint]
-min_speech_duration_ms = 300
-max_speech_duration_ms = 30000
-trailing_silence_ms = 1000
-force_timeout_ms = 60000
-vad_assisted = true
-vad_silence_confirm_frames = 8
+# 最大语音长度 (ms)，连续说话超过此长度会自动断句上屏（0 表示不限制）
+max_speech_duration_ms = 20000
+# 语音结束后的静音等待时间 (ms)
+trailing_silence_ms = 800
+
+# ============================================================
+# 标点模型目录
+# ============================================================
+punct_model_dir = "/home/deepin/deepin-v2t/models/punct-ct-transformer"
+
